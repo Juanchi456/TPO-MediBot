@@ -8,7 +8,7 @@ import androidx.room.RoomDatabase
 @Database(
     entities = [MissionHistoryEntity::class, EventLogEntity::class],
     version = 1,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun missionHistoryDao(): MissionHistoryDao
@@ -25,7 +25,8 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "medibot_database"
                 )
-                    .fallbackToDestructiveMigration()
+                    // Sin fallbackToDestructiveMigration: un cambio de esquema exige una Migration
+                    // explícita para no borrar en silencio la auditoría (ver app/schemas/).
                     .build()
                 INSTANCE = instance
                 instance

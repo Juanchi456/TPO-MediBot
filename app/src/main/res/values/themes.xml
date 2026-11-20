@@ -2,7 +2,8 @@
 <resources>
 
     <style name="Theme.MediBot" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Compose handles all theming; this is the minimal fallback for the Activity window. -->
+        <!-- Compose maneja el tema; la ventana usa el fondo oscuro para evitar un destello blanco al abrir. -->
+        <item name="android:windowBackground">@color/ic_launcher_background</item>
     </style>
 
 </resources>
