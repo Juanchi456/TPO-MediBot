@@ -36,7 +36,7 @@ flowchart TD
     end
 
     UI -- "eventos (sendCommand, connect...)" --> VM
-    VM -- "StateFlow<SupervisionUiState><br/>collectAsStateWithLifecycle()" --> UI
+    VM -- "StateFlow de SupervisionUiState<br/>collectAsStateWithLifecycle()" --> UI
     VM --> Rules
     Sim --> Rules
     VM --> RR
@@ -76,16 +76,19 @@ stateDiagram-v2
     PAUSED --> EXECUTING_MISSION: RESUME
     EXECUTING_MISSION --> AWAITING_NFC_HANDOFF: destino
     AWAITING_NFC_HANDOFF --> RETURNING_TO_SAFE_POINT: entrega (o bloqueo por tamper)
-    EXECUTING_MISSION --> RETURNING_TO_SAFE_POINT: RETURN · CANCEL (a base) · batería < 15 %
+    EXECUTING_MISSION --> RETURNING_TO_SAFE_POINT: RETURN · CANCEL (a base) · batería bajo 15 %
+    WAITING_ELEVATOR --> RETURNING_TO_SAFE_POINT: RETURN · CANCEL · batería bajo 15 %
     RETURNING_TO_SAFE_POINT --> AT_SAFE_POINT: llega a SAFE_POINT_P2
     RETURNING_TO_SAFE_POINT --> IDLE_AT_DOCK: llega a DOCK_BASE
     EXECUTING_MISSION --> EMERGENCY_STOPPED: OPERATIONAL_STOP
     EMERGENCY_STOPPED --> PAUSED: rearme presencial
-    PAUSED --> LOW_BATTERY_CROUCHED: batería < 8 %
+    PAUSED --> RETURNING_TO_SAFE_POINT: RETURN · CANCEL
+    PAUSED --> LOW_BATTERY_CROUCHED: batería bajo 8 %
+    INCIDENT_BLOCKED --> LOW_BATTERY_CROUCHED: batería bajo 8 %
     LOW_BATTERY_CROUCHED --> PAUSED: cambio de batería presencial
 ```
 
-*Simplificado. Pausar también aplica durante `RETURNING_TO_SAFE_POINT`, cancelar desde `PAUSED`, `WAITING_ELEVATOR` e `INCIDENT_BLOCKED`, y la detención desde cualquier estado. Las condiciones exactas están en `domain/CommandRules.kt`.*
+*Simplificado. También se puede pausar durante `RETURNING_TO_SAFE_POINT`, cancelar o regresar desde `INCIDENT_BLOCKED`, y emitir la detención desde cualquier estado. Tras el rearme, el robot vuelve a `INCIDENT_BLOCKED` si el obstáculo sigue presente, y queda en reposo si no tenía misión y está en la base o el punto seguro. El cambio de batería también puede dejarlo en reposo. Las condiciones exactas están en `domain/CommandRules.kt` y `SimulatedRobotRepository`.*
 
 ---
 

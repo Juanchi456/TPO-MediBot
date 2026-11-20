@@ -64,7 +64,7 @@ app/src/main/java/com/medibot/g1/
 
 ## Compilar y probar
 
-Requisitos: Android Studio con JDK 17 o superior y Android SDK 35.
+Requisitos: Android Studio y Android SDK 35. El daemon de Gradle 9.3 usa JDK 25 (Gradle lo descarga solo, ver `gradle/gradle-daemon-jvm.properties`); el código compila con target JVM 17.
 
 ```powershell
 .\gradlew.bat :app:assembleDebug
@@ -80,7 +80,7 @@ Requisitos: Android Studio con JDK 17 o superior y Android SDK 35.
 
 Hay **24 tests unitarios** (JVM, con tiempo virtual): reglas de habilitación, cada escenario del simulador y el ViewModel (roles y validación del operador).
 
-**Demo rápida:** al abrir la app, conectar con un ID cualquiera (por ejemplo `OP-LAB-04`) como operador. Después usar el botón violeta (panel de ingeniería) para disparar los escenarios.
+**Demo rápida:** al abrir la app, conectar como operador con un ID de 3 a 20 letras, números o guiones (por ejemplo `OP-LAB-04`). Después usar el botón violeta (panel de ingeniería) para disparar los escenarios.
 
 ## Paleta (Dark Medical-Tech)
 
