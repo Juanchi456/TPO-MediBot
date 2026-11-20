@@ -2,12 +2,12 @@ package com.medibot.g1.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -20,81 +20,23 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.medibot.g1.data.model.*
 import com.medibot.g1.ui.theme.*
+import com.medibot.g1.domain.Precondition
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextOverflow
 
 @Composable
 fun MissionsScreen(
-    telemetry: TelemetryState,
+    catalog: List<MissionConfig>,
+    preconditions: List<Precondition>,
+    canStart: Boolean,
     onStartMission: (MissionConfig) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val predefinedMissions = remember {
-        listOf(
-            MissionConfig(
-                missionId = "MED-01-GAS",
-                name = "Urgencia: Gases en Sangre → UTI",
-                description = "Transporte prioritario de muestra arterial heparinada desde el Laboratorio Central hasta el puesto de Terapia Intensiva.",
-                priority = MissionPriority.URGENT,
-                origin = HospitalNode.LAB_CENTRAL,
-                destination = HospitalNode.UTI_NURSING,
-                route = listOf(
-                    HospitalNode.LAB_CENTRAL,
-                    HospitalNode.FIRE_DOOR_PB,
-                    HospitalNode.ELEVATOR_BANK,
-                    HospitalNode.SAFE_POINT_P2,
-                    HospitalNode.UTI_NURSING
-                ),
-                requiredTempRange = 2.0f..6.0f,
-                maxVibrationG = 0.30f,
-                requiresNfcHandoff = true
-            ),
-            MissionConfig(
-                missionId = "MED-02-HEM",
-                name = "Hemoterapia: 2 Unidades Plasma → Quirófano",
-                description = "Traslado de 2 bolsas de plasma fresco congelado hacia quirófano/UTI en el Piso 2, manteniendo hermetismo y cadena de frío.",
-                priority = MissionPriority.URGENT,
-                origin = HospitalNode.LAB_CENTRAL,
-                destination = HospitalNode.UTI_NURSING,
-                route = listOf(
-                    HospitalNode.LAB_CENTRAL,
-                    HospitalNode.FIRE_DOOR_PB,
-                    HospitalNode.ELEVATOR_BANK,
-                    HospitalNode.SAFE_POINT_P2,
-                    HospitalNode.UTI_NURSING
-                ),
-                requiredTempRange = 2.0f..6.0f,
-                maxVibrationG = 0.25f,
-                requiresNfcHandoff = true
-            ),
-            MissionConfig(
-                missionId = "MED-03-FAR",
-                name = "Farmacia: Medicación Controlada → Piso 2",
-                description = "Distribución programada de antibióticos y analgésicos desde Base de Carga hasta el Receso Seguro de Espera.",
-                priority = MissionPriority.STANDARD,
-                origin = HospitalNode.DOCK_BASE,
-                destination = HospitalNode.SAFE_POINT_P2,
-                route = listOf(
-                    HospitalNode.DOCK_BASE,
-                    HospitalNode.LAB_CENTRAL,
-                    HospitalNode.FIRE_DOOR_PB,
-                    HospitalNode.ELEVATOR_BANK,
-                    HospitalNode.SAFE_POINT_P2
-                ),
-                requiredTempRange = 15.0f..25.0f,
-                maxVibrationG = 0.40f,
-                requiresNfcHandoff = true
-            )
-        )
-    }
-
-    var selectedMissionIndex by remember { mutableIntStateOf(0) }
-    val selectedMission = predefinedMissions[selectedMissionIndex]
-
-    // Pre-condition evaluations
-    val isBatteryOk = telemetry.batteryPercentage >= 20
-    val isLockSealed = telemetry.servicePayload.smartLockState == SmartLockState.SEALED_LOCKED
-    val isTempOk = telemetry.servicePayload.compartmentTempCelsius <= 6.0f
-    val isIdle = telemetry.operationalState == OperationalState.IDLE_AT_DOCK || telemetry.operationalState == OperationalState.PAUSED
-    val allPreconditionsMet = isBatteryOk && isLockSealed && isTempOk && isIdle
+    var selectedMissionIndex by rememberSaveable { mutableIntStateOf(0) }
+    val selectedMission = catalog[selectedMissionIndex.coerceIn(0, catalog.lastIndex)]
+    val allPreconditionsMet = preconditions.all { it.passed }
 
     Column(
         modifier = modifier
@@ -154,26 +96,13 @@ fun MissionsScreen(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                PreconditionItem(
-                    label = "Batería suficiente (> 20%)",
-                    statusText = "${telemetry.batteryPercentage}%",
-                    passed = isBatteryOk
-                )
-                PreconditionItem(
-                    label = "Cerradura inteligente sellada",
-                    statusText = telemetry.servicePayload.smartLockState.displayName,
-                    passed = isLockSealed
-                )
-                PreconditionItem(
-                    label = "Temperatura compartimento (< 6.0°C)",
-                    statusText = "${telemetry.servicePayload.compartmentTempCelsius}°C",
-                    passed = isTempOk
-                )
-                PreconditionItem(
-                    label = "Robot disponible en reposo",
-                    statusText = telemetry.operationalState.displayName,
-                    passed = isIdle
-                )
+                preconditions.forEach { precondition ->
+                    PreconditionItem(
+                        label = precondition.label,
+                        statusText = precondition.currentValue,
+                        passed = precondition.passed
+                    )
+                }
             }
         }
 
@@ -181,7 +110,7 @@ fun MissionsScreen(
 
         // Missions List
         Text(
-            text = "MISIONES CONFIGURADAS (3 DISPONIBLES):",
+            text = "MISIONES CONFIGURADAS (${catalog.size} DISPONIBLES):",
             style = MaterialTheme.typography.labelSmall,
             color = DarkOnSurface,
             letterSpacing = 1.sp
@@ -189,7 +118,7 @@ fun MissionsScreen(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        predefinedMissions.forEachIndexed { index, mission ->
+        catalog.forEachIndexed { index, mission ->
             val isSelected = index == selectedMissionIndex
             val priorityColor = when (mission.priority) {
                 MissionPriority.URGENT -> CriticalRed
@@ -208,7 +137,11 @@ fun MissionsScreen(
                         if (isSelected) NeonCyan else CardNormalBorder,
                         RoundedCornerShape(14.dp)
                     )
-                    .clickable { selectedMissionIndex = index }
+                    .selectable(
+                        selected = isSelected,
+                        onClick = { selectedMissionIndex = index },
+                        role = Role.RadioButton
+                    )
                     .padding(14.dp)
             ) {
                 Column {
@@ -221,7 +154,10 @@ fun MissionsScreen(
                             text = mission.name,
                             style = MaterialTheme.typography.titleMedium,
                             color = if (isSelected) NeonCyan else DarkOnBackground,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(end = 8.dp)
                         )
 
                         Box(
@@ -257,12 +193,16 @@ fun MissionsScreen(
                     ) {
                         Text(
                             text = "Ruta: ${mission.origin.displayName} → ${mission.destination.displayName}",
-                            fontSize = 10.sp,
+                            fontSize = 11.sp,
                             color = NeonCyan.copy(alpha = 0.8f),
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(end = 8.dp)
                         )
                         Text(
-                            text = "Max vib: ${mission.maxVibrationG}G",
+                            text = "Vib. máx ${mission.maxVibrationG} G",
+                            maxLines = 1,
                             fontSize = 10.sp,
                             color = DarkOnSurface
                         )
@@ -276,7 +216,7 @@ fun MissionsScreen(
         // Dispatch Button
         Button(
             onClick = { onStartMission(selectedMission) },
-            enabled = allPreconditionsMet,
+            enabled = canStart,
             colors = ButtonDefaults.buttonColors(
                 containerColor = NeonCyan,
                 contentColor = DarkBackground,
@@ -288,16 +228,19 @@ fun MissionsScreen(
                 .fillMaxWidth()
                 .height(50.dp)
         ) {
-            Icon(Icons.Default.Send, contentDescription = null, modifier = Modifier.size(18.dp))
+            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = "DESPACHAR: ${selectedMission.name.take(28)}...",
+                text = "DESPACHAR: ${selectedMission.name}",
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 fontWeight = FontWeight.Bold,
                 fontSize = 13.sp
             )
         }
 
-        Spacer(modifier = Modifier.height(24.dp))
+        // Espacio para que el botón flotante del panel de ingeniería no tape controles
+        Spacer(modifier = Modifier.height(96.dp))
     }
 }
 
@@ -313,7 +256,7 @@ private fun PreconditionItem(label: String, statusText: String, passed: Boolean)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 imageVector = if (passed) Icons.Default.CheckCircle else Icons.Default.Cancel,
-                contentDescription = null,
+                contentDescription = if (passed) "Cumple" else "No cumple",
                 tint = if (passed) TerminalGreen else CriticalRed,
                 modifier = Modifier.size(16.dp)
             )

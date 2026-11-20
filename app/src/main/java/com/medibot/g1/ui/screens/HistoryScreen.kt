@@ -18,21 +18,26 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.medibot.g1.data.local.EventLogEntity
-import com.medibot.g1.data.local.MissionHistoryEntity
+import com.medibot.g1.data.model.AlertSeverity
+import com.medibot.g1.data.model.EventRecord
+import com.medibot.g1.data.model.MissionRecord
+import com.medibot.g1.data.model.MissionStatus
+import com.medibot.g1.ui.components.ConfirmActionDialog
+import androidx.compose.runtime.saveable.rememberSaveable
 import com.medibot.g1.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.*
 
 @Composable
 fun HistoryScreen(
-    missionsHistory: List<MissionHistoryEntity>,
-    eventLogs: List<EventLogEntity>,
+    missionsHistory: List<MissionRecord>,
+    eventLogs: List<EventRecord>,
     onInsertSeedData: () -> Unit,
     onClearHistory: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var selectedTab by remember { mutableIntStateOf(0) }
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    var showClearConfirmation by rememberSaveable { mutableStateOf(false) }
     val tabs = listOf("MISIONES EJECUTADAS", "AUDITORÍA / EVENTOS")
 
     Column(
@@ -42,11 +47,7 @@ fun HistoryScreen(
             .padding(16.dp)
     ) {
         // Header & Actions
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
             Column {
                 Text(
                     text = "HISTORIAL Y AUDITORÍA (ROOM)",
@@ -61,35 +62,33 @@ fun HistoryScreen(
                 )
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
                     onClick = onInsertSeedData,
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                     shape = RoundedCornerShape(6.dp),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = NeonCyan),
-                    border = ButtonDefaults.outlinedButtonBorder.copy(
-                        brush = androidx.compose.ui.graphics.SolidColor(NeonCyan)
-                    ),
-                    modifier = Modifier.height(30.dp)
+                    border = androidx.compose.foundation.BorderStroke(1.dp, NeonCyan),
+                    modifier = Modifier.heightIn(min = 40.dp)
                 ) {
                     Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("SEMILLA", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    Text("DATOS DE EJEMPLO", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 }
 
                 OutlinedButton(
-                    onClick = onClearHistory,
+                    onClick = { showClearConfirmation = true },
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                     shape = RoundedCornerShape(6.dp),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = CriticalRed),
-                    border = ButtonDefaults.outlinedButtonBorder.copy(
-                        brush = androidx.compose.ui.graphics.SolidColor(CriticalRed)
-                    ),
-                    modifier = Modifier.height(30.dp)
+                    border = androidx.compose.foundation.BorderStroke(1.dp, CriticalRed),
+                    modifier = Modifier.heightIn(min = 40.dp)
                 ) {
                     Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(14.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("LIMPIAR", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    Text("BORRAR HISTORIAL", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -101,7 +100,7 @@ fun HistoryScreen(
             selectedTabIndex = selectedTab,
             containerColor = DarkSurface,
             contentColor = NeonCyan,
-            divider = { Divider(color = CardNormalBorder) }
+            divider = { HorizontalDivider(color = CardNormalBorder) }
         ) {
             tabs.forEachIndexed { index, title ->
                 Tab(
@@ -128,24 +127,40 @@ fun HistoryScreen(
             EventsTabContent(events = eventLogs)
         }
     }
+
+    if (showClearConfirmation) {
+        ConfirmActionDialog(
+            title = "¿Borrar historial y auditoría?",
+            message = "Se eliminan todas las misiones y eventos registrados en el dispositivo. No se puede deshacer.",
+            confirmLabel = "BORRAR TODO",
+            accentColor = CriticalRed,
+            onConfirm = {
+                showClearConfirmation = false
+                onClearHistory()
+            },
+            onDismiss = { showClearConfirmation = false }
+        )
+    }
 }
 
 @Composable
-private fun MissionsTabContent(missions: List<MissionHistoryEntity>) {
+private fun MissionsTabContent(missions: List<MissionRecord>) {
     if (missions.isEmpty()) {
-        EmptyState(message = "No hay misiones persistidas en Room.\nEjecute el Escenario 1 o pulse 'SEMILLA' para poblar la base.")
+        EmptyState(message = "No hay misiones persistidas en Room.\nEjecute el Escenario 1 o pulse 'DATOS DE EJEMPLO'.")
     } else {
         val dateFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
 
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(bottom = 88.dp),
             modifier = Modifier.fillMaxSize()
         ) {
-            items(missions, key = { it.missionId }) { item ->
+            items(missions, key = { it.runId }) { item ->
                 val statusColor = when (item.status) {
-                    "COMPLETED" -> TerminalGreen
-                    "CANCELLED" -> WarningAmber
-                    else -> CriticalRed
+                    MissionStatus.COMPLETED -> TerminalGreen
+                    MissionStatus.CANCELLED -> WarningAmber
+                    MissionStatus.IN_PROGRESS -> NeonCyan
+                    MissionStatus.FAILED -> CriticalRed
                 }
 
                 Box(
@@ -166,7 +181,10 @@ private fun MissionsTabContent(missions: List<MissionHistoryEntity>) {
                                 text = item.missionName,
                                 style = MaterialTheme.typography.titleMedium,
                                 color = DarkOnBackground,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(end = 8.dp)
                             )
 
                             Box(
@@ -177,7 +195,7 @@ private fun MissionsTabContent(missions: List<MissionHistoryEntity>) {
                                     .padding(horizontal = 6.dp, vertical = 2.dp)
                             ) {
                                 Text(
-                                    text = item.status,
+                                    text = item.status.label.uppercase(),
                                     color = statusColor,
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold
@@ -188,7 +206,7 @@ private fun MissionsTabContent(missions: List<MissionHistoryEntity>) {
                         Spacer(modifier = Modifier.height(6.dp))
 
                         Text(
-                            text = "${item.originNode}  ➔  ${item.destinationNode}",
+                            text = "${item.originName}  ➔  ${item.destinationName}",
                             fontSize = 11.sp,
                             color = NeonCyan,
                             fontWeight = FontWeight.SemiBold
@@ -202,9 +220,18 @@ private fun MissionsTabContent(missions: List<MissionHistoryEntity>) {
                             color = DarkOnSurface
                         )
 
+                        if (item.notes.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = item.notes,
+                                fontSize = 11.sp,
+                                color = DarkOnBackground
+                            )
+                        }
+
                         Spacer(modifier = Modifier.height(10.dp))
 
-                        Divider(color = DarkSurfaceVariant, thickness = 1.dp)
+                        HorizontalDivider(color = DarkSurfaceVariant, thickness = 1.dp)
 
                         Spacer(modifier = Modifier.height(8.dp))
 
@@ -214,12 +241,12 @@ private fun MissionsTabContent(missions: List<MissionHistoryEntity>) {
                         ) {
                             val durationSec = ((item.endTime - item.startTime) / 1000).coerceAtLeast(0)
                             Text(
-                                text = "Fin: ${dateFormat.format(Date(item.endTime))} (${durationSec}s)",
+                                text = "${item.runId} · Fin ${dateFormat.format(Date(item.endTime))} (${durationSec}s)",
                                 fontSize = 10.sp,
                                 color = DarkOnSurface
                             )
                             Text(
-                                text = "Batería: ${item.finalBatteryPct}% | Temp: ${item.maxTempCelsius}°C",
+                                text = "Bat. ${item.finalBatteryPct}% · Tmáx ${item.maxTempCelsius}°C · Vmáx ${item.maxVibrationG}G",
                                 fontSize = 10.sp,
                                 color = DarkOnSurface
                             )
@@ -232,7 +259,7 @@ private fun MissionsTabContent(missions: List<MissionHistoryEntity>) {
 }
 
 @Composable
-private fun EventsTabContent(events: List<EventLogEntity>) {
+private fun EventsTabContent(events: List<EventRecord>) {
     if (events.isEmpty()) {
         EmptyState(message = "Log de auditoría vacío en Room.\nLas acciones del operador y eventos se registrarán aquí automáticamente.")
     } else {
@@ -240,13 +267,14 @@ private fun EventsTabContent(events: List<EventLogEntity>) {
 
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(bottom = 88.dp),
             modifier = Modifier.fillMaxSize()
         ) {
             items(events, key = { it.eventId }) { event ->
                 val severityColor = when (event.severity) {
-                    "CRITICAL" -> CriticalRed
-                    "WARNING" -> WarningAmber
-                    else -> NeonCyan
+                    AlertSeverity.CRITICAL -> CriticalRed
+                    AlertSeverity.WARNING -> WarningAmber
+                    AlertSeverity.INFO -> NeonCyan
                 }
 
                 Box(
@@ -280,7 +308,10 @@ private fun EventsTabContent(events: List<EventLogEntity>) {
                                     text = event.title,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = DarkOnBackground
+                                    color = DarkOnBackground,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(end = 8.dp)
                                 )
 
                                 Text(

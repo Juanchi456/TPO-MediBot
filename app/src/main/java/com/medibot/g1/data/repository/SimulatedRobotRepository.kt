@@ -1,677 +1,839 @@
 package com.medibot.g1.data.repository
 
-import com.medibot.g1.data.model.*
-import kotlinx.coroutines.*
+import com.medibot.g1.data.model.AlertSeverity
+import com.medibot.g1.data.model.CommandExecutionState
+import com.medibot.g1.data.model.ConnectionStatus
+import com.medibot.g1.data.model.HospitalNode
+import com.medibot.g1.data.model.MissionCatalog
+import com.medibot.g1.data.model.MissionConfig
+import com.medibot.g1.data.model.MissionOutcome
+import com.medibot.g1.data.model.MissionStatus
+import com.medibot.g1.data.model.OperationalState
+import com.medibot.g1.data.model.RobotAlert
+import com.medibot.g1.data.model.RobotCommand
+import com.medibot.g1.data.model.RobotEvent
+import com.medibot.g1.data.model.RobotPosture
+import com.medibot.g1.data.model.ServicePayloadTelemetry
+import com.medibot.g1.data.model.SmartLockState
+import com.medibot.g1.data.model.TelemetryState
+import com.medibot.g1.domain.CommandRules
+import com.medibot.g1.domain.OperationalLimits
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
+import kotlin.math.max
+import kotlin.random.Random
 
-class SimulatedRobotRepository : RobotRepository {
+/** Tiempos del simulador (ms). Parametrizados para poder probarlo con tiempo virtual. */
+data class SimulationTiming(
+    val telemetryPeriodMs: Long = 1_000L,
+    val commandLatencyMs: Long = 1_200L,
+    val commandTimeoutMs: Long = OperationalLimits.COMMAND_TIMEOUT_MS,
+    val routeStepMs: Long = 2_500L,
+    val handoffMs: Long = 2_500L,
+    val relockMs: Long = 4_000L,
+    val returnMs: Long = 3_000L,
+    val obstacleClearMs: Long = 10_000L
+)
 
-    private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+/**
+ * Robot simulado. Mantiene el estado "real" del robot ([robot]) separado de lo que
+ * recibe la app ([telemetry]): si el enlace cae, el robot sigue operando pero la app
+ * deja de recibir paquetes y los eventos quedan en cola hasta que vuelva el enlace.
+ *
+ * Todo el estado mutable se toca desde un único dispatcher secuencial, así que no hay
+ * condiciones de carrera entre el bucle de telemetría, las misiones y los comandos.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+class SimulatedRobotRepository(
+    private val dispatcher: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(1),
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val random: Random = Random.Default,
+    private val timing: SimulationTiming = SimulationTiming()
+) : RobotRepository, SimulatorControls {
 
-    private val _telemetryFlow = MutableStateFlow(
-        TelemetryState(
-            robotId = "G1-EDU-MED01",
-            firmwareVersion = "v2.4.1-DEX3",
-            connectionStatus = ConnectionStatus.ONLINE,
-            latencyMs = 42,
-            signalDbm = -35,
-            lastUpdatedTimestamp = System.currentTimeMillis(),
-            batteryPercentage = 95,
-            batteryTempCelsius = 28.5f,
-            estimatedMinutesLeft = 190,
-            operationalState = OperationalState.IDLE_AT_DOCK,
-            currentMission = null,
-            missionProgressPct = 0,
-            currentNode = HospitalNode.DOCK_BASE,
-            speedMps = 0.0f,
-            posture = RobotPosture.BIPED_STANDING,
-            hriLedColor = "#00F5D4",
-            hriVoiceStatus = "Sistema listo en Base de Carga",
-            servicePayload = ServicePayloadTelemetry(
-                compartmentTempCelsius = 4.0f,
-                bioSampleStabilityIndexG = 0.12f,
-                smartLockState = SmartLockState.SEALED_LOCKED
-            ),
-            activeAlerts = emptyList()
-        )
-    )
-    override val telemetryFlow: StateFlow<TelemetryState> = _telemetryFlow.asStateFlow()
+    private val scope = CoroutineScope(SupervisorJob() + dispatcher)
 
-    private val _commandStateFlow = MutableStateFlow<CommandExecutionState>(CommandExecutionState.Idle)
-    override val commandStateFlow: StateFlow<CommandExecutionState> = _commandStateFlow.asStateFlow()
+    // ---------- Estado interno del robot (solo se accede desde [dispatcher]) ----------
+    private var robot: TelemetryState = initialRobotState()
+    private var batteryLevel = INITIAL_BATTERY
+    private var coolingTargetC = NOMINAL_CAPSULE_TEMP_C
+    private var activeRun: MissionRun? = null
+    private var resumeTarget: OperationalState? = null
+    private var obstaclePresent = false
+    private var fastBatteryDrain = false
+    private val activeConditions = mutableSetOf<AlertCondition>()
+    private val queuedEvents = ArrayDeque<RobotEvent>()
 
+    private var motionJob: Job? = null
+    private var obstacleJob: Job? = null
+    private var relockJob: Job? = null
+
+    // ---------- Lo que ve la app ----------
+    private val _telemetry = MutableStateFlow(robot.copy(lastUpdatedTimestamp = clock()))
+    override val telemetry: StateFlow<TelemetryState> = _telemetry.asStateFlow()
+
+    private val _commandState = MutableStateFlow<CommandExecutionState>(CommandExecutionState.Idle)
+    override val commandState: StateFlow<CommandExecutionState> = _commandState.asStateFlow()
+
+    private val _events = MutableSharedFlow<RobotEvent>(extraBufferCapacity = 64)
+    override val events: Flow<RobotEvent> = _events.asSharedFlow()
+
+    // ---------- Controles del simulador ----------
     private val _forceRejectNext = MutableStateFlow(false)
     override val forceRejectNext: StateFlow<Boolean> = _forceRejectNext.asStateFlow()
 
-    private var telemetryJob: Job? = null
-    private var scenarioJob: Job? = null
+    private val _linkUp = MutableStateFlow(true)
+    override val linkUp: StateFlow<Boolean> = _linkUp.asStateFlow()
 
     init {
-        startTelemetryLoop()
-    }
-
-    private fun startTelemetryLoop() {
-        telemetryJob?.cancel()
-        telemetryJob = repositoryScope.launch {
+        scope.launch {
             while (isActive) {
-                delay(1000L)
-                val current = _telemetryFlow.value
-                if (current.connectionStatus != ConnectionStatus.OFFLINE) {
-                    val latVariation = (-3..4).random()
-                    val tempVariation = ((-1..1).random()) * 0.1f
-                    val signalVariation = (-2..2).random()
-                    val vibVariation = if (current.speedMps > 0.1f) ((-2..3).random()) * 0.01f else 0.0f
-
-                    _telemetryFlow.value = current.copy(
-                        lastUpdatedTimestamp = System.currentTimeMillis(),
-                        latencyMs = (current.latencyMs + latVariation).coerceIn(28, 85),
-                        signalDbm = (current.signalDbm + signalVariation).coerceIn(-75, -20),
-                        batteryTempCelsius = ((current.batteryTempCelsius + tempVariation) * 10).toInt() / 10f,
-                        servicePayload = current.servicePayload.copy(
-                            bioSampleStabilityIndexG = if (current.speedMps > 0f) {
-                                (0.12f + vibVariation).coerceIn(0.08f, 0.45f)
-                            } else {
-                                0.05f
-                            }
-                        )
-                    )
-                }
-                // When OFFLINE, lastUpdatedTimestamp is deliberately NOT updated to trigger stale detection
+                delay(timing.telemetryPeriodMs)
+                tick()
             }
         }
     }
 
-    override fun resetCommandState() {
-        _commandStateFlow.value = CommandExecutionState.Idle
+    /** Detiene el simulador (usado por los tests). */
+    fun shutdown() {
+        scope.cancel()
     }
 
-    override suspend fun sendCommand(command: RobotCommand) {
-        val current = _telemetryFlow.value
+    // =====================================================================
+    // Comandos
+    // =====================================================================
 
-        // Check force reject flag from debug panel
-        if (_forceRejectNext.value) {
-            _forceRejectNext.value = false
-            _commandStateFlow.value = CommandExecutionState.Pending(command.commandName)
-            delay(1200L)
-            _commandStateFlow.value = CommandExecutionState.Rejected(
-                command.commandName,
-                "Comando rechazado por política de seguridad (Forzado por modo debug de ingeniería)"
+    override suspend fun sendCommand(command: RobotCommand): CommandExecutionState = withContext(dispatcher) {
+        val commandId = "CMD-${shortId()}"
+        val issuedAt = clock()
+        _commandState.value = CommandExecutionState.Pending(commandId, command.commandName, issuedAt)
+
+        // La orden solo llega si hay enlace dentro del timeout: enviada ≠ recibida.
+        val delivered = withTimeoutOrNull(timing.commandTimeoutMs) {
+            delay(timing.commandLatencyMs)
+            _linkUp.first { it }
+        }
+
+        val result: CommandExecutionState = when {
+            delivered == null -> CommandExecutionState.NoResponse(
+                commandId, command.commandName, issuedAt, timing.commandTimeoutMs
             )
-            return
+            _forceRejectNext.value -> {
+                _forceRejectNext.value = false
+                CommandExecutionState.Rejected(
+                    commandId, command.commandName, issuedAt,
+                    "Rechazado por política de seguridad (forzado desde el panel de ingeniería)."
+                )
+            }
+            else -> when (val verdict = execute(command)) {
+                is Verdict.Accepted -> CommandExecutionState.Confirmed(
+                    commandId, command.commandName, issuedAt, verdict.message
+                )
+                is Verdict.Refused -> CommandExecutionState.Rejected(
+                    commandId, command.commandName, issuedAt, verdict.reason
+                )
+            }
         }
+        _commandState.value = result
+        publish()
+        result
+    }
 
-        // Check if offline
-        if (current.connectionStatus == ConnectionStatus.OFFLINE) {
-            _commandStateFlow.value = CommandExecutionState.Pending(command.commandName)
-            delay(2500L)
-            _commandStateFlow.value = CommandExecutionState.NoResponse(command.commandName, 2500L)
-            return
-        }
+    private fun execute(command: RobotCommand): Verdict = when (command) {
+        is RobotCommand.StartMission -> handleStart(command.mission)
+        RobotCommand.PauseMission -> handlePause()
+        RobotCommand.ResumeMission -> handleResume()
+        RobotCommand.CancelMission -> handleCancel()
+        RobotCommand.ReturnToSafePoint -> handleReturnToSafePoint()
+        RobotCommand.OperationalStop -> handleOperationalStop()
+        is RobotCommand.AcknowledgeAlert -> handleAcknowledge(command.alertId)
+    }
 
-        // Simulated network latency
-        _commandStateFlow.value = CommandExecutionState.Pending(command.commandName)
-        delay(1200L)
-
-        // Process discrete command
-        when (command) {
-            is RobotCommand.StartMission -> handleStartMission(command.mission)
-            is RobotCommand.PauseMission -> handlePauseMission()
-            is RobotCommand.ResumeMission -> handleResumeMission()
-            is RobotCommand.CancelMission -> handleCancelMission()
-            is RobotCommand.ReturnToSafePoint -> handleReturnToSafePoint()
-            is RobotCommand.OperationalStop -> handleOperationalStop()
-            is RobotCommand.AcknowledgeAlert -> handleAcknowledgeAlert(command.alertId)
+    private fun handleStart(mission: MissionConfig): Verdict {
+        val payload = robot.servicePayload
+        return when {
+            robot.operationalState != OperationalState.IDLE_AT_DOCK -> Verdict.Refused(
+                "Robot en estado incompatible (${robot.operationalState.displayName}). Solo se inicia desde reposo."
+            )
+            robot.batteryPercentage < OperationalLimits.MIN_BATTERY_TO_START_PCT -> Verdict.Refused(
+                "Batería insuficiente (${robot.batteryPercentage}%). Se requiere mínimo ${OperationalLimits.MIN_BATTERY_TO_START_PCT}%."
+            )
+            payload.smartLockState != SmartLockState.SEALED_LOCKED -> Verdict.Refused(
+                "Compartimento no sellado (${payload.smartLockState.displayName}). Cierre la cápsula antes de iniciar."
+            )
+            payload.compartmentTempCelsius > OperationalLimits.MAX_START_TEMP_C -> Verdict.Refused(
+                "Temperatura de cápsula elevada (${payload.compartmentTempCelsius} °C). Máximo ${OperationalLimits.MAX_START_TEMP_C} °C."
+            )
+            else -> {
+                startMissionRun(mission)
+                Verdict.Accepted("Misión '${mission.name}' iniciada hacia ${mission.destination.displayName}.")
+            }
         }
     }
 
-    private fun handleStartMission(mission: MissionConfig) {
-        val current = _telemetryFlow.value
-
-        if (current.batteryPercentage < 20) {
-            _commandStateFlow.value = CommandExecutionState.Rejected(
-                "START_MISSION",
-                "Batería crítica (${current.batteryPercentage}%). Se requiere mínimo 20% para iniciar."
+    private fun handlePause(): Verdict = when (robot.operationalState) {
+        OperationalState.WAITING_ELEVATOR -> Verdict.Refused(
+            "Protocolo de seguridad: no se puede pausar mientras cruza el umbral o espera en el ascensor."
+        )
+        OperationalState.EXECUTING_MISSION, OperationalState.RETURNING_TO_SAFE_POINT -> {
+            motionJob?.cancel()
+            resumeTarget = robot.operationalState
+            robot = robot.copy(
+                operationalState = OperationalState.PAUSED,
+                speedMps = 0f,
+                posture = RobotPosture.BIPED_STANDING,
+                hriLedColor = LED_AMBER,
+                hriVoiceStatus = "Unidad en pausa por indicación del operador."
             )
-            return
+            Verdict.Accepted("Marcha pausada de forma segura en ${robot.currentNode.displayName}.")
         }
+        else -> Verdict.Refused(
+            "No hay marcha activa para pausar (estado: ${robot.operationalState.displayName})."
+        )
+    }
 
-        if (current.servicePayload.smartLockState != SmartLockState.SEALED_LOCKED) {
-            _commandStateFlow.value = CommandExecutionState.Rejected(
-                "START_MISSION",
-                "Compuerta no sellada (${current.servicePayload.smartLockState.displayName}). Cierre el compartimento antes de iniciar."
+    private fun handleResume(): Verdict = when (robot.operationalState) {
+        OperationalState.PAUSED -> {
+            val target = resumeTarget ?: OperationalState.EXECUTING_MISSION
+            resumeTarget = null
+            if (target == OperationalState.RETURNING_TO_SAFE_POINT || activeRun == null) {
+                startReturnToSafePoint()
+                Verdict.Accepted("Retorno a punto seguro reanudado.")
+            } else {
+                setWalking("Reanudando trayectoria.")
+                launchRouteRunner()
+                Verdict.Accepted("Misión reanudada.")
+            }
+        }
+        OperationalState.INCIDENT_BLOCKED -> when {
+            CommandRules.hasUnacknowledgedCritical(robot) -> Verdict.Refused(
+                "Reconozca las alertas críticas antes de reanudar."
             )
-            return
-        }
-
-        if (current.servicePayload.compartmentTempCelsius > 6.0f) {
-            _commandStateFlow.value = CommandExecutionState.Rejected(
-                "START_MISSION",
-                "Temperatura del compartimento elevada (${current.servicePayload.compartmentTempCelsius}°C). Máximo permitido 6.0°C."
+            obstaclePresent -> Verdict.Refused(
+                "El LiDAR sigue detectando un obstáculo frontal a 0.35 m (mínimo ${OperationalLimits.OBSTACLE_MIN_CLEARANCE_M} m)."
             )
-            return
+            else -> {
+                setWalking("Pasillo despejado. Reanudando trayectoria.")
+                launchRouteRunner()
+                Verdict.Accepted("Pasillo despejado. Misión reanudada.")
+            }
         }
+        else -> Verdict.Refused(
+            "No hay misión pausada ni bloqueada para reanudar (estado: ${robot.operationalState.displayName})."
+        )
+    }
 
-        if (current.operationalState != OperationalState.IDLE_AT_DOCK &&
-            current.operationalState != OperationalState.PAUSED &&
-            current.operationalState != OperationalState.RETURNING_TO_SAFE_POINT) {
-            _commandStateFlow.value = CommandExecutionState.Rejected(
-                "START_MISSION",
-                "Robot en estado incompatible: ${current.operationalState.displayName}"
-            )
-            return
+    private fun handleCancel(): Verdict {
+        if (activeRun == null) return Verdict.Refused("No hay ninguna misión activa para cancelar.")
+        if (robot.operationalState !in CommandRules.CANCELLABLE_STATES) {
+            return Verdict.Refused("No se puede cancelar en estado ${robot.operationalState.displayName}.")
         }
+        motionJob?.cancel()
+        raiseAlert(
+            AlertSeverity.WARNING,
+            "Misión cancelada",
+            "La misión fue abortada por orden del operador en ${robot.currentNode.displayName}."
+        )
+        finishMission(MissionStatus.CANCELLED, "Cancelada por el operador en ${robot.currentNode.displayName}.")
+        // TODO(definir): el informe indica que tras cancelar el robot vuelve a la base.
+        robot = robot.copy(
+            operationalState = OperationalState.IDLE_AT_DOCK,
+            speedMps = 0f,
+            posture = RobotPosture.BIPED_STANDING,
+            hriLedColor = LED_AMBER,
+            hriVoiceStatus = "Misión cancelada. En espera de instrucciones."
+        )
+        return Verdict.Accepted("Misión cancelada. El robot queda detenido a la espera de instrucciones.")
+    }
 
-        _telemetryFlow.value = current.copy(
+    private fun handleReturnToSafePoint(): Verdict = when {
+        robot.batteryPercentage < OperationalLimits.CRITICAL_BATTERY_CROUCH_PCT -> Verdict.Refused(
+            "Batería crítica (${robot.batteryPercentage}%): no es seguro caminar. El robot debe agacharse en el lugar."
+        )
+        robot.operationalState == OperationalState.IDLE_AT_DOCK ||
+            robot.operationalState == OperationalState.LOW_BATTERY_CROUCHED -> Verdict.Refused(
+            "Orden no aplicable en estado ${robot.operationalState.displayName}."
+        )
+        robot.operationalState == OperationalState.RETURNING_TO_SAFE_POINT -> Verdict.Refused(
+            "El robot ya está regresando al punto seguro."
+        )
+        else -> {
+            resumeTarget = null
+            startReturnToSafePoint()
+            Verdict.Accepted("Retorno a punto seguro confirmado.")
+        }
+    }
+
+    private fun handleOperationalStop(): Verdict {
+        motionJob?.cancel()
+        resumeTarget = null
+        robot = robot.copy(
+            operationalState = OperationalState.EMERGENCY_STOPPED,
+            speedMps = 0f,
+            posture = RobotPosture.BIPED_STANDING,
+            hriLedColor = LED_RED,
+            hriVoiceStatus = "Detención operativa activada."
+        )
+        raiseAlert(
+            AlertSeverity.CRITICAL,
+            "Detención operativa",
+            "Detención por software ejecutada. No sustituye la parada física de emergencia del robot."
+        )
+        return Verdict.Accepted("Detención operativa completada: velocidad 0.0 m/s.")
+    }
+
+    private fun handleAcknowledge(alertId: String): Verdict {
+        val alert = robot.activeAlerts.find { it.id == alertId }
+            ?: return Verdict.Refused("Alerta '$alertId' no encontrada.")
+        if (alert.isAcknowledged) return Verdict.Refused("La alerta '${alert.title}' ya estaba reconocida.")
+        val now = clock()
+        robot = robot.copy(
+            activeAlerts = robot.activeAlerts.map {
+                if (it.id == alertId) it.copy(isAcknowledged = true, acknowledgedAt = now) else it
+            }
+        )
+        return Verdict.Accepted("Alerta '${alert.title}' reconocida.")
+    }
+
+    // =====================================================================
+    // Ejecución de misiones
+    // =====================================================================
+
+    private fun startMissionRun(mission: MissionConfig, incidentAt: HospitalNode? = null) {
+        motionJob?.cancel()
+        relockJob?.cancel()
+        val payload = robot.servicePayload
+        val firstStep = if (mission.route.firstOrNull() == mission.origin) 1 else 0
+        val run = MissionRun(
+            config = mission,
+            runId = "${mission.missionId}-${shortId().take(4)}",
+            startedAt = clock(),
+            routeIndex = firstStep,
+            incidentAtNode = incidentAt,
+            maxTemp = payload.compartmentTempCelsius,
+            maxVib = payload.bioSampleStabilityIndexG
+        )
+        activeRun = run
+        resumeTarget = null
+        robot = robot.copy(
             operationalState = OperationalState.EXECUTING_MISSION,
             currentMission = mission,
+            missionRunId = run.runId,
             missionProgressPct = 0,
             currentNode = mission.origin,
-            speedMps = 0.6f,
+            speedMps = CRUISE_SPEED,
             posture = RobotPosture.BIPED_WALKING,
-            hriLedColor = "#00F5D4",
-            hriVoiceStatus = "Iniciando misión: ${mission.name}"
+            hriLedColor = LED_CYAN,
+            hriVoiceStatus = "Unidad médica en tránsito. Conserve su derecha."
         )
+        launchRouteRunner()
+    }
 
-        _commandStateFlow.value = CommandExecutionState.Confirmed(
-            "START_MISSION",
-            "Misión '${mission.name}' iniciada con éxito hacia ${mission.destination.displayName}."
-        )
-
-        // Launch execution steps
-        scenarioJob?.cancel()
-        scenarioJob = repositoryScope.launch {
-            val route = mission.route
-            for (i in route.indices) {
-                delay(2500L)
-                val node = route[i]
-                val pct = ((i + 1) * 100) / route.size
-                val snap = _telemetryFlow.value
-                if (snap.operationalState != OperationalState.EXECUTING_MISSION) break
-
-                val newState = if (node == HospitalNode.ELEVATOR_BANK) OperationalState.WAITING_ELEVATOR else OperationalState.EXECUTING_MISSION
-                val newPosture = if (node == HospitalNode.FIRE_DOOR_PB) RobotPosture.OPERATING_DOOR_ARM else RobotPosture.BIPED_WALKING
-
-                _telemetryFlow.value = snap.copy(
-                    lastUpdatedTimestamp = System.currentTimeMillis(),
+    /** Avanza por la ruta desde el último nodo alcanzado; se puede relanzar tras una pausa. */
+    private fun launchRouteRunner() {
+        motionJob?.cancel()
+        motionJob = scope.launch {
+            val run = activeRun ?: return@launch
+            val route = run.config.route
+            val lastIndex = (route.size - 1).coerceAtLeast(1)
+            while (run.routeIndex < route.size) {
+                delay(timing.routeStepMs)
+                val node = route[run.routeIndex]
+                val atElevator = node == HospitalNode.ELEVATOR_BANK
+                robot = robot.copy(
                     currentNode = node,
-                    operationalState = newState,
-                    missionProgressPct = pct,
-                    posture = newPosture,
-                    speedMps = if (node == HospitalNode.ELEVATOR_BANK) 0.0f else 0.6f,
-                    hriVoiceStatus = "Transitando por: ${node.displayName}"
+                    missionProgressPct = (run.routeIndex * 100 / lastIndex).coerceAtMost(99),
+                    operationalState = if (atElevator) OperationalState.WAITING_ELEVATOR else OperationalState.EXECUTING_MISSION,
+                    posture = when (node) {
+                        HospitalNode.FIRE_DOOR_PB -> RobotPosture.OPERATING_DOOR_ARM
+                        HospitalNode.ELEVATOR_BANK -> RobotPosture.BIPED_STANDING
+                        else -> RobotPosture.BIPED_WALKING
+                    },
+                    speedMps = if (atElevator) 0f else CRUISE_SPEED,
+                    hriLedColor = LED_CYAN,
+                    hriVoiceStatus = if (atElevator) "Esperando ascensor hacia Piso 2." else "Transitando por: ${node.displayName}"
                 )
+                run.routeIndex++
+                if (run.incidentAtNode == node) {
+                    run.incidentAtNode = null
+                    blockByObstacle(node)
+                    publish()
+                    return@launch
+                }
+                publish()
             }
+            arriveAndHandOff(run)
+        }
+    }
 
-            val finalSnap = _telemetryFlow.value
-            if (finalSnap.operationalState == OperationalState.EXECUTING_MISSION) {
-                _telemetryFlow.value = finalSnap.copy(
-                    operationalState = OperationalState.AWAITING_NFC_HANDOFF,
-                    missionProgressPct = 100,
-                    speedMps = 0.0f,
-                    posture = RobotPosture.BIPED_STANDING,
-                    hriLedColor = "#7C4DFF",
-                    hriVoiceStatus = "Destino alcanzado. A la espera de validación de enfermería (NFC)."
-                )
+    private suspend fun arriveAndHandOff(run: MissionRun) {
+        robot = robot.copy(
+            operationalState = OperationalState.AWAITING_NFC_HANDOFF,
+            missionProgressPct = 100,
+            speedMps = 0f,
+            posture = RobotPosture.BIPED_STANDING,
+            hriLedColor = LED_VIOLET,
+            hriVoiceStatus = "Destino alcanzado. Acerque su credencial para retirar la carga."
+        )
+        publish()
+        delay(timing.handoffMs)
 
-                delay(2500L)
-                val validatedSnap = _telemetryFlow.value
-                _telemetryFlow.value = validatedSnap.copy(
-                    operationalState = OperationalState.IDLE_AT_DOCK,
-                    currentMission = null,
-                    missionProgressPct = 0,
-                    hriLedColor = "#00E676",
-                    hriVoiceStatus = "Misión completada. Muestra biológica entregada.",
-                    servicePayload = validatedSnap.servicePayload.copy(
-                        smartLockState = SmartLockState.UNLOCKED_NFC_AUTHORIZED
-                    ),
-                    activeAlerts = validatedSnap.activeAlerts + RobotAlert(
-                        id = UUID.randomUUID().toString().take(8),
-                        severity = AlertSeverity.INFO,
-                        title = "Misión Finalizada",
-                        message = "Misión ${mission.name} completada satisfactoriamente con validación NFC."
-                    )
+        robot = robot.copy(
+            servicePayload = robot.servicePayload.copy(smartLockState = SmartLockState.UNLOCKED_NFC_AUTHORIZED),
+            hriLedColor = LED_GREEN,
+            hriVoiceStatus = "Credencial validada. Custodia transferida."
+        )
+        raiseAlert(
+            AlertSeverity.INFO,
+            "Entrega validada",
+            "Misión ${run.config.name} entregada en ${run.config.destination.displayName} con validación NFC."
+        )
+        finishMission(MissionStatus.COMPLETED, "Entrega validada por NFC en destino.")
+        // TODO(definir): "En Base" se usa como estado de reposo aunque el robot esté en otro nodo.
+        robot = robot.copy(operationalState = OperationalState.IDLE_AT_DOCK)
+        publish()
+        scheduleRelock()
+    }
+
+    /** Tras retirar la carga, el compartimento se vuelve a sellar para el próximo despacho. */
+    private fun scheduleRelock() {
+        relockJob?.cancel()
+        relockJob = scope.launch {
+            delay(timing.relockMs)
+            if (robot.servicePayload.smartLockState == SmartLockState.UNLOCKED_NFC_AUTHORIZED) {
+                robot = robot.copy(
+                    servicePayload = robot.servicePayload.copy(smartLockState = SmartLockState.SEALED_LOCKED),
+                    hriVoiceStatus = "Compartimento cerrado y sellado. Listo para nueva carga."
                 )
+                publish()
             }
         }
     }
 
-    private fun handlePauseMission() {
-        val current = _telemetryFlow.value
-        if (current.operationalState != OperationalState.EXECUTING_MISSION) {
-            _commandStateFlow.value = CommandExecutionState.Rejected(
-                "PAUSE_MISSION",
-                "El robot no se encuentra en ejecución de misión activa."
-            )
-            return
-        }
-
-        if (current.currentNode == HospitalNode.ELEVATOR_BANK) {
-            _commandStateFlow.value = CommandExecutionState.Rejected(
-                "PAUSE_MISSION",
-                "Protocolo de Seguridad: Prohibido pausar durante la maniobra o cruce de puertas del ascensor."
-            )
-            return
-        }
-
-        scenarioJob?.cancel()
-        _telemetryFlow.value = current.copy(
-            operationalState = OperationalState.PAUSED,
-            speedMps = 0.0f,
-            posture = RobotPosture.BIPED_STANDING,
-            hriLedColor = "#FFAB00",
-            hriVoiceStatus = "Misión en pausa por comando de operador"
-        )
-        _commandStateFlow.value = CommandExecutionState.Confirmed(
-            "PAUSE_MISSION",
-            "Misión pausada de forma segura."
-        )
-    }
-
-    private fun handleResumeMission() {
-        val current = _telemetryFlow.value
-        if (current.operationalState != OperationalState.PAUSED) {
-            _commandStateFlow.value = CommandExecutionState.Rejected(
-                "RESUME_MISSION",
-                "El robot no está pausado (Estado actual: ${current.operationalState.displayName})."
-            )
-            return
-        }
-
-        _telemetryFlow.value = current.copy(
-            operationalState = OperationalState.EXECUTING_MISSION,
-            speedMps = 0.6f,
-            posture = RobotPosture.BIPED_WALKING,
-            hriLedColor = "#00F5D4",
-            hriVoiceStatus = "Reanudando trayectoria"
-        )
-        _commandStateFlow.value = CommandExecutionState.Confirmed(
-            "RESUME_MISSION",
-            "Misión reanudada con éxito."
-        )
-    }
-
-    private fun handleCancelMission() {
-        val current = _telemetryFlow.value
-        if (current.currentMission == null && current.operationalState != OperationalState.EXECUTING_MISSION && current.operationalState != OperationalState.PAUSED) {
-            _commandStateFlow.value = CommandExecutionState.Rejected(
-                "CANCEL_MISSION",
-                "No hay ninguna misión activa o pausada para cancelar."
-            )
-            return
-        }
-
-        scenarioJob?.cancel()
-        _telemetryFlow.value = current.copy(
-            operationalState = OperationalState.IDLE_AT_DOCK,
-            currentMission = null,
-            missionProgressPct = 0,
-            speedMps = 0.0f,
-            posture = RobotPosture.BIPED_STANDING,
-            hriLedColor = "#FFAB00",
-            hriVoiceStatus = "Misión cancelada por el operador",
-            activeAlerts = current.activeAlerts + RobotAlert(
-                id = UUID.randomUUID().toString().take(8),
-                severity = AlertSeverity.WARNING,
-                title = "Misión Cancelada",
-                message = "La misión actual fue abortada por orden directa del operador."
-            )
-        )
-        _commandStateFlow.value = CommandExecutionState.Confirmed(
-            "CANCEL_MISSION",
-            "Misión cancelada. El robot permanece estático a la espera de instrucciones."
-        )
-    }
-
-    private fun handleReturnToSafePoint() {
-        val current = _telemetryFlow.value
-        scenarioJob?.cancel()
-
-        _telemetryFlow.value = current.copy(
+    private fun startReturnToSafePoint() {
+        motionJob?.cancel()
+        // Regresar es la acción que resuelve la batería baja: se camina despacio y con consumo normal.
+        fastBatteryDrain = false
+        robot = robot.copy(
             operationalState = OperationalState.RETURNING_TO_SAFE_POINT,
-            speedMps = 0.4f,
+            speedMps = RETURN_SPEED,
             posture = RobotPosture.BIPED_WALKING,
-            hriLedColor = "#FFAB00",
-            hriVoiceStatus = "Evacuando hacia Punto Seguro de Espera"
+            hriLedColor = LED_AMBER,
+            hriVoiceStatus = "Desviando hacia punto seguro de espera."
         )
-        _commandStateFlow.value = CommandExecutionState.Confirmed(
-            "RETURN_TO_SAFE_POINT",
-            "Orden de retorno a Punto Seguro confirmada."
-        )
-
-        scenarioJob = repositoryScope.launch {
-            delay(3000L)
-            val updated = _telemetryFlow.value
-            _telemetryFlow.value = updated.copy(
+        motionJob = scope.launch {
+            delay(timing.returnMs)
+            if (activeRun != null) {
+                finishMission(
+                    MissionStatus.CANCELLED,
+                    "Desviada a punto seguro por orden del operador; carga no entregada."
+                )
+            }
+            // TODO(definir): punto seguro según piso y estado final propio (hoy: P2 + "En Base").
+            robot = robot.copy(
                 operationalState = OperationalState.IDLE_AT_DOCK,
                 currentNode = HospitalNode.SAFE_POINT_P2,
-                currentMission = null,
-                missionProgressPct = 0,
-                speedMps = 0.0f,
+                speedMps = 0f,
                 posture = RobotPosture.BIPED_STANDING,
-                hriLedColor = "#00F5D4",
-                hriVoiceStatus = "A salvo en Punto Seguro de Espera (P2)"
+                hriLedColor = LED_CYAN,
+                hriVoiceStatus = "A salvo en punto seguro de espera (P2)."
             )
+            publish()
         }
     }
 
-    private fun handleOperationalStop() {
-        scenarioJob?.cancel()
-        val current = _telemetryFlow.value
-        _telemetryFlow.value = current.copy(
-            operationalState = OperationalState.EMERGENCY_STOPPED,
-            speedMps = 0.0f,
+    private fun blockByObstacle(node: HospitalNode) {
+        obstaclePresent = true
+        robot = robot.copy(
+            operationalState = OperationalState.INCIDENT_BLOCKED,
+            speedMps = 0f,
             posture = RobotPosture.BIPED_STANDING,
-            hriLedColor = "#FF1744",
-            hriVoiceStatus = "PARADA OPERATIVA ACTIVADA",
-            activeAlerts = current.activeAlerts + RobotAlert(
-                id = UUID.randomUUID().toString().take(8),
-                severity = AlertSeverity.CRITICAL,
-                title = "Detención Operativa",
-                message = "Detención operativa por software ejecutada de inmediato. Nota: No sustituye la parada física de emergencia."
-            )
+            hriLedColor = LED_RED,
+            hriVoiceStatus = "Atención: pasillo bloqueado. Unidad médica detenida."
         )
-        _commandStateFlow.value = CommandExecutionState.Confirmed(
-            "OPERATIONAL_STOP",
-            "Detención operativa inmediata completada."
+        raiseAlert(
+            AlertSeverity.CRITICAL,
+            "Obstáculo en pasillo",
+            "Camilla bloqueando el paso frontal a 0.35 m en ${node.displayName}. Decisión requerida: esperar y reanudar, o desviar a punto seguro."
         )
-    }
-
-    private fun handleAcknowledgeAlert(alertId: String) {
-        val current = _telemetryFlow.value
-        val alert = current.activeAlerts.find { it.id == alertId }
-        if (alert == null) {
-            _commandStateFlow.value = CommandExecutionState.Rejected(
-                "ACKNOWLEDGE_ALERT",
-                "Identificador de alerta '$alertId' no encontrado."
+        obstacleJob?.cancel()
+        obstacleJob = scope.launch {
+            delay(timing.obstacleClearMs)
+            obstaclePresent = false
+            raiseAlert(
+                AlertSeverity.INFO,
+                "Pasillo despejado",
+                "El LiDAR ya no detecta obstáculos a menos de ${OperationalLimits.OBSTACLE_MIN_CLEARANCE_M} m. Puede reanudar."
             )
-            return
+            publish()
         }
-
-        _telemetryFlow.value = current.copy(
-            activeAlerts = current.activeAlerts.map {
-                if (it.id == alertId) it.copy(isAcknowledged = true) else it
-            }
-        )
-        _commandStateFlow.value = CommandExecutionState.Confirmed(
-            "ACKNOWLEDGE_ALERT",
-            "Alerta '${alert.title}' reconocida."
-        )
     }
 
-    // ==================== ESCENARIOS OBLIGATORIOS ====================
-
-    override fun injectScenarioNormalMission() {
-        scenarioJob?.cancel()
-        val mission = MissionConfig(
-            name = "Urgencia: Gases en Sangre → UTI",
-            description = "Transporte prioritario de jeringa heparinizada de gases arteriales desde Lab Central a UTI Piso 2.",
-            priority = MissionPriority.URGENT,
-            origin = HospitalNode.LAB_CENTRAL,
-            destination = HospitalNode.UTI_NURSING,
-            route = listOf(
-                HospitalNode.LAB_CENTRAL,
-                HospitalNode.FIRE_DOOR_PB,
-                HospitalNode.ELEVATOR_BANK,
-                HospitalNode.SAFE_POINT_P2,
-                HospitalNode.UTI_NURSING
-            ),
-            requiredTempRange = 2.0f..6.0f,
-            maxVibrationG = 0.30f,
-            requiresNfcHandoff = true
+    private fun crouchForLowBattery() {
+        motionJob?.cancel()
+        resumeTarget = null
+        fastBatteryDrain = false
+        robot = robot.copy(
+            operationalState = OperationalState.LOW_BATTERY_CROUCHED,
+            speedMps = 0f,
+            posture = RobotPosture.CROUCHED_SAFE_LOCK,
+            hriLedColor = LED_RED,
+            hriVoiceStatus = "Batería crítica. Postura agachada de seguridad activa."
         )
+        raiseAlert(
+            AlertSeverity.CRITICAL,
+            "Batería crítica (${robot.batteryPercentage}%) — robot agachado",
+            "El robot adoptó la postura agachada (CROUCHED_SAFE_LOCK) para evitar un desplome. Requiere recarga en el lugar."
+        )
+        finishMission(MissionStatus.FAILED, "Interrumpida por batería crítica: el robot quedó agachado en ${robot.currentNode.displayName}.")
+    }
 
-        _telemetryFlow.value = TelemetryState(
-            robotId = "G1-EDU-MED01",
-            firmwareVersion = "v2.4.1-DEX3",
-            connectionStatus = ConnectionStatus.ONLINE,
-            latencyMs = 38,
-            signalDbm = -32,
-            lastUpdatedTimestamp = System.currentTimeMillis(),
-            batteryPercentage = 85,
-            batteryTempCelsius = 29.2f,
-            estimatedMinutesLeft = 175,
+    private fun finishMission(status: MissionStatus, notes: String) {
+        val run = activeRun ?: return
+        emitEvent(
+            RobotEvent.MissionFinished(
+                MissionOutcome(
+                    runId = run.runId,
+                    mission = run.config,
+                    status = status,
+                    startedAt = run.startedAt,
+                    endedAt = clock(),
+                    finalBatteryPct = robot.batteryPercentage,
+                    maxTempCelsius = run.maxTemp,
+                    maxVibrationG = run.maxVib,
+                    notes = notes
+                )
+            )
+        )
+        activeRun = null
+        resumeTarget = null
+        robot = robot.copy(currentMission = null, missionRunId = null, missionProgressPct = 0)
+    }
+
+    private fun setWalking(voice: String) {
+        robot = robot.copy(
             operationalState = OperationalState.EXECUTING_MISSION,
-            currentMission = mission,
-            missionProgressPct = 5,
-            currentNode = HospitalNode.LAB_CENTRAL,
-            speedMps = 0.6f,
+            speedMps = CRUISE_SPEED,
             posture = RobotPosture.BIPED_WALKING,
-            hriLedColor = "#00F5D4",
-            hriVoiceStatus = "Misión iniciada: Gases en Sangre → UTI",
-            servicePayload = ServicePayloadTelemetry(
-                compartmentTempCelsius = 4.0f,
-                bioSampleStabilityIndexG = 0.14f,
-                smartLockState = SmartLockState.SEALED_LOCKED
-            ),
-            activeAlerts = emptyList()
+            hriLedColor = LED_CYAN,
+            hriVoiceStatus = voice
         )
+    }
 
-        scenarioJob = repositoryScope.launch {
-            val route = mission.route
-            for (i in route.indices) {
-                delay(2000L)
-                val node = route[i]
-                val pct = ((i + 1) * 100) / route.size
-                val snap = _telemetryFlow.value
+    // =====================================================================
+    // Física simplificada y alertas reactivas
+    // =====================================================================
 
-                val newState = when (node) {
-                    HospitalNode.ELEVATOR_BANK -> OperationalState.WAITING_ELEVATOR
-                    else -> OperationalState.EXECUTING_MISSION
-                }
+    private fun tick() {
+        if (robot.operationalState in ACTIVE_STATES) {
+            batteryLevel -= if (fastBatteryDrain) FAST_DRAIN_PER_TICK else NORMAL_DRAIN_PER_TICK
+        }
+        batteryLevel = batteryLevel.coerceIn(0.0, 100.0)
 
-                val newPosture = when (node) {
-                    HospitalNode.FIRE_DOOR_PB -> RobotPosture.OPERATING_DOOR_ARM
-                    HospitalNode.ELEVATOR_BANK -> RobotPosture.BIPED_STANDING
-                    else -> RobotPosture.BIPED_WALKING
-                }
+        val payload = robot.servicePayload
+        val temp = payload.compartmentTempCelsius
+        val newTemp = round2(temp + (coolingTargetC - temp) * 0.3f + random.nextInt(-1, 2) * 0.05f)
+        val newVib = if (robot.speedMps > 0.05f) round2(0.12f + random.nextInt(0, 6) * 0.01f) else 0.05f
 
-                val speed = if (node == HospitalNode.ELEVATOR_BANK) 0.0f else 0.6f
+        robot = robot.copy(
+            latencyMs = (robot.latencyMs + random.nextInt(-3, 5)).coerceIn(28, 85),
+            signalDbm = (robot.signalDbm + random.nextInt(-2, 3)).coerceIn(-75, -20),
+            batteryTempCelsius = round1(robot.batteryTempCelsius + random.nextInt(-1, 2) * 0.1f).coerceIn(26f, 42f),
+            servicePayload = payload.copy(compartmentTempCelsius = newTemp, bioSampleStabilityIndexG = newVib)
+        )
+        syncBattery()
+        activeRun?.track(newTemp, newVib)
+        evaluateThresholds()
+        publish()
+    }
 
-                _telemetryFlow.value = snap.copy(
-                    lastUpdatedTimestamp = System.currentTimeMillis(),
-                    currentNode = node,
-                    operationalState = newState,
-                    missionProgressPct = pct,
-                    posture = newPosture,
-                    speedMps = speed,
-                    batteryPercentage = (snap.batteryPercentage - 1).coerceAtLeast(1),
-                    estimatedMinutesLeft = (snap.estimatedMinutesLeft - 2).coerceAtLeast(1),
-                    hriVoiceStatus = "Transitando por: ${node.displayName}",
-                    servicePayload = snap.servicePayload.copy(
-                        compartmentTempCelsius = 3.9f + ((-1..1).random() * 0.1f),
-                        bioSampleStabilityIndexG = 0.15f + ((-2..2).random() * 0.02f)
-                    )
-                )
-            }
+    private fun evaluateThresholds() {
+        val battery = robot.batteryPercentage
+        val payload = robot.servicePayload
 
-            // Arrive at UTI
-            delay(1500L)
-            val atUti = _telemetryFlow.value
-            _telemetryFlow.value = atUti.copy(
-                operationalState = OperationalState.AWAITING_NFC_HANDOFF,
-                missionProgressPct = 100,
-                speedMps = 0.0f,
-                posture = RobotPosture.BIPED_STANDING,
-                hriLedColor = "#7C4DFF",
-                hriVoiceStatus = "Esperando validación NFC de enfermería en UTI"
+        condition(AlertCondition.LOW_BATTERY, battery < OperationalLimits.MIN_BATTERY_TO_START_PCT) {
+            raiseAlert(
+                AlertSeverity.WARNING,
+                "Batería baja ($battery%)",
+                "Por debajo del ${OperationalLimits.MIN_BATTERY_TO_START_PCT}% no se pueden iniciar misiones. Evalúe regresar a punto seguro."
             )
-
-            // Simulate authorized NFC tap
-            delay(2500L)
-            val done = _telemetryFlow.value
-            _telemetryFlow.value = done.copy(
-                operationalState = OperationalState.IDLE_AT_DOCK,
-                currentMission = null,
-                missionProgressPct = 0,
-                speedMps = 0.0f,
-                hriLedColor = "#00E676",
-                hriVoiceStatus = "Misión completada con éxito. Custodia transferida.",
-                servicePayload = done.servicePayload.copy(
-                    smartLockState = SmartLockState.UNLOCKED_NFC_AUTHORIZED
-                ),
-                activeAlerts = done.activeAlerts + RobotAlert(
-                    id = UUID.randomUUID().toString().take(8),
-                    severity = AlertSeverity.INFO,
-                    title = "Entrega Validada",
-                    message = "Muestra de gases recibida correctamente en Enfermería UTI con firma digital NFC."
-                )
+        }
+        if (battery < OperationalLimits.CRITICAL_BATTERY_CROUCH_PCT &&
+            robot.operationalState != OperationalState.IDLE_AT_DOCK &&
+            robot.operationalState != OperationalState.LOW_BATTERY_CROUCHED
+        ) {
+            crouchForLowBattery()
+        }
+        condition(AlertCondition.COLD_CHAIN, payload.compartmentTempCelsius > OperationalLimits.COLD_CHAIN_BREAK_TEMP_C) {
+            raiseAlert(
+                AlertSeverity.CRITICAL,
+                "Cadena de frío comprometida (${payload.compartmentTempCelsius} °C)",
+                "La cápsula superó ${OperationalLimits.COLD_CHAIN_BREAK_TEMP_C} °C. Riesgo para la muestra: reconozca y cancele o desvíe a punto seguro."
+            )
+        }
+        condition(AlertCondition.VIBRATION_CRITICAL, payload.bioSampleStabilityIndexG > OperationalLimits.VIBRATION_CRITICAL_G) {
+            raiseAlert(
+                AlertSeverity.CRITICAL,
+                "Vibración crítica (${payload.bioSampleStabilityIndexG} G)",
+                "Riesgo de hemólisis en las muestras transportadas."
+            )
+        }
+        condition(
+            AlertCondition.VIBRATION_WARNING,
+            payload.bioSampleStabilityIndexG > OperationalLimits.VIBRATION_WARNING_G &&
+                payload.bioSampleStabilityIndexG <= OperationalLimits.VIBRATION_CRITICAL_G
+        ) {
+            raiseAlert(
+                AlertSeverity.WARNING,
+                "Vibración elevada (${payload.bioSampleStabilityIndexG} G)",
+                "La vibración supera ${OperationalLimits.VIBRATION_WARNING_G} G. Considere reducir la velocidad."
+            )
+        }
+        condition(AlertCondition.TAMPER, payload.smartLockState == SmartLockState.TAMPER_ALERT) {
+            raiseAlert(
+                AlertSeverity.CRITICAL,
+                "Alerta de manipulación (tamper)",
+                "Se detectó un intento de apertura no autorizada del compartimento biológico."
             )
         }
     }
 
-    override fun injectScenarioLowBattery() {
-        scenarioJob?.cancel()
-        val current = _telemetryFlow.value
+    /** Emite la alerta una vez al entrar en la condición; se rearma cuando la condición desaparece. */
+    private inline fun condition(key: AlertCondition, active: Boolean, onEnter: () -> Unit) {
+        if (active) {
+            if (activeConditions.add(key)) onEnter()
+        } else {
+            activeConditions.remove(key)
+        }
+    }
 
-        _telemetryFlow.value = current.copy(
-            batteryPercentage = 14,
-            estimatedMinutesLeft = 24,
-            batteryTempCelsius = 36.1f,
-            hriLedColor = "#FFAB00",
-            hriVoiceStatus = "Batería baja: Retorno a base recomendado",
-            activeAlerts = current.activeAlerts + RobotAlert(
-                id = UUID.randomUUID().toString().take(8),
-                severity = AlertSeverity.WARNING,
-                title = "Batería Baja (14%)",
-                message = "Capacidad insuficiente para nuevas misiones. Se prohíbe el inicio de traslados. Regrese a punto seguro o base."
-            )
+    private fun raiseAlert(severity: AlertSeverity, title: String, message: String) {
+        val alert = RobotAlert(
+            id = shortId(),
+            severity = severity,
+            title = title,
+            message = message,
+            timestamp = clock(),
+            relatedMissionId = activeRun?.runId
         )
+        val all = robot.activeAlerts + alert
+        // Se conservan todas las alertas sin reconocer y solo las últimas reconocidas.
+        val pending = all.filter { !it.isAcknowledged }
+        val acknowledged = all.filter { it.isAcknowledged }.takeLast(MAX_ACKNOWLEDGED_ALERTS)
+        robot = robot.copy(activeAlerts = (pending + acknowledged).sortedBy { it.timestamp })
+        emitEvent(RobotEvent.AlertRaised(alert))
+    }
 
-        scenarioJob = repositoryScope.launch {
-            delay(5000L)
-            val snap = _telemetryFlow.value
-            _telemetryFlow.value = snap.copy(
-                batteryPercentage = 7,
-                estimatedMinutesLeft = 11,
-                batteryTempCelsius = 39.4f,
-                operationalState = OperationalState.LOW_BATTERY_CROUCHED,
-                speedMps = 0.0f,
-                posture = RobotPosture.CROUCHED_SAFE_LOCK,
-                hriLedColor = "#FF1744",
-                hriVoiceStatus = "Batería crítica. Postura agachada de seguridad activa para evitar desplome.",
-                activeAlerts = snap.activeAlerts + RobotAlert(
-                    id = UUID.randomUUID().toString().take(8),
-                    severity = AlertSeverity.CRITICAL,
-                    title = "Batería Crítica (7%) - Agachado",
-                    message = "El robot adoptó la postura bípeda agachada (CROUCHED_SAFE_LOCK) para prevenir caídas accidentales. Conecte cargador urgente."
-                )
+    // =====================================================================
+    // Enlace
+    // =====================================================================
+
+    /** Publica el estado del robot hacia la app solo si hay enlace. */
+    private fun publish() {
+        if (_linkUp.value) {
+            _telemetry.value = robot.copy(
+                connectionStatus = ConnectionStatus.ONLINE,
+                lastUpdatedTimestamp = clock()
             )
         }
     }
 
-    override fun injectScenarioDisconnection() {
-        scenarioJob?.cancel()
-        telemetryJob?.cancel()
-        val current = _telemetryFlow.value
-        _telemetryFlow.value = current.copy(
-            connectionStatus = ConnectionStatus.OFFLINE,
-            latencyMs = 0,
-            signalDbm = -99,
-            hriVoiceStatus = "Sin enlace telemétrico"
-        )
+    private fun emitEvent(event: RobotEvent) {
+        if (_linkUp.value) _events.tryEmit(event) else queuedEvents.addLast(event)
     }
 
-    override fun restoreConnection() {
-        val current = _telemetryFlow.value
-        _telemetryFlow.value = current.copy(
-            connectionStatus = ConnectionStatus.ONLINE,
-            latencyMs = 40,
-            signalDbm = -34,
-            lastUpdatedTimestamp = System.currentTimeMillis(),
-            hriVoiceStatus = "Enlace Wi-Fi 6 industrial restablecido"
-        )
-        startTelemetryLoop()
-    }
-
-    override fun injectScenarioIncident() {
-        scenarioJob?.cancel()
-        val mission = MissionConfig(
-            name = "Hemoterapia: 2 Unidades Plasma → Quirófano",
-            description = "Transporte de hemocomponentes con estricto control de temperatura.",
-            priority = MissionPriority.URGENT,
-            origin = HospitalNode.LAB_CENTRAL,
-            destination = HospitalNode.UTI_NURSING,
-            route = listOf(
-                HospitalNode.LAB_CENTRAL,
-                HospitalNode.FIRE_DOOR_PB,
-                HospitalNode.ELEVATOR_BANK,
-                HospitalNode.SAFE_POINT_P2,
-                HospitalNode.UTI_NURSING
-            )
-        )
-
-        _telemetryFlow.value = TelemetryState(
-            batteryPercentage = 76,
-            operationalState = OperationalState.EXECUTING_MISSION,
-            currentMission = mission,
-            missionProgressPct = 20,
-            currentNode = HospitalNode.LAB_CENTRAL,
-            speedMps = 0.6f,
-            posture = RobotPosture.BIPED_WALKING,
-            hriLedColor = "#00F5D4",
-            hriVoiceStatus = "En tránsito hacia puerta cortafuego PB",
-            servicePayload = ServicePayloadTelemetry(
-                compartmentTempCelsius = 3.6f,
-                bioSampleStabilityIndexG = 0.16f,
-                smartLockState = SmartLockState.SEALED_LOCKED
-            )
-        )
-
-        scenarioJob = repositoryScope.launch {
-            delay(2000L)
-            val snap = _telemetryFlow.value
-            _telemetryFlow.value = snap.copy(
-                lastUpdatedTimestamp = System.currentTimeMillis(),
-                currentNode = HospitalNode.FIRE_DOOR_PB,
-                operationalState = OperationalState.INCIDENT_BLOCKED,
-                missionProgressPct = 40,
-                speedMps = 0.0f,
-                posture = RobotPosture.BIPED_STANDING,
-                hriLedColor = "#FF1744",
-                hriVoiceStatus = "INCIDENTE: Pasillo bloqueado por camilla hospitalaria",
-                activeAlerts = snap.activeAlerts + RobotAlert(
-                    id = UUID.randomUUID().toString().take(8),
-                    severity = AlertSeverity.CRITICAL,
-                    title = "Obstáculo Crítico en Pasillo",
-                    message = "Camilla bloqueando paso frontal a 0.35m en Puerta Cortafuego PB. Decisión requerida del operador: Esperar y Reanudar o Desviar a Punto Seguro."
-                )
-            )
-        }
-    }
-
-    override fun injectScenarioServiceFailure() {
-        scenarioJob?.cancel()
-        val current = _telemetryFlow.value
-
-        _telemetryFlow.value = current.copy(
-            hriLedColor = "#FF1744",
-            hriVoiceStatus = "ALERTA BIOLÓGICA: Cadena de frío rota y manipulación detectada",
-            servicePayload = current.servicePayload.copy(
-                compartmentTempCelsius = 8.4f,
-                smartLockState = SmartLockState.TAMPER_ALERT
-            ),
-            activeAlerts = current.activeAlerts + listOf(
-                RobotAlert(
-                    id = UUID.randomUUID().toString().take(8),
-                    severity = AlertSeverity.CRITICAL,
-                    title = "Cadena de Frío Comprometida (8.4°C)",
-                    message = "Temperatura de cápsula superó el límite biológico (8.4°C > 6.0°C). Alto riesgo de desnaturalización. Reconozca alerta y cancele misión o desvíe a punto seguro."
-                ),
-                RobotAlert(
-                    id = UUID.randomUUID().toString().take(8),
-                    severity = AlertSeverity.CRITICAL,
-                    title = "Alerta de Manipulación (Tamper)",
-                    message = "Se registró apertura forzada o manipulación no autorizada del cerrojo electromagnético del compartimento biológico."
-                )
-            )
-        )
-    }
+    // =====================================================================
+    // Controles del simulador
+    // =====================================================================
 
     override fun setForceRejectNext(value: Boolean) {
         _forceRejectNext.value = value
     }
-}
 
+    override fun restoreConnection() {
+        scope.launch {
+            _linkUp.value = true
+            while (queuedEvents.isNotEmpty()) _events.tryEmit(queuedEvents.removeFirst())
+            publish()
+        }
+    }
+
+    override fun resetSimulation() {
+        scope.launch {
+            resetState()
+            _commandState.value = CommandExecutionState.Idle
+            publish()
+        }
+    }
+
+    override fun injectScenario(scenario: SimulationScenario) {
+        scope.launch {
+            when (scenario) {
+                SimulationScenario.NORMAL_MISSION -> {
+                    resetState()
+                    batteryLevel = 85.0
+                    syncBattery()
+                    robot = robot.copy(currentNode = HospitalNode.LAB_CENTRAL)
+                    startMissionRun(MissionCatalog.bloodGas)
+                }
+                SimulationScenario.LOW_BATTERY -> {
+                    // Se demuestra durante una misión para que la acción "regresar" esté disponible.
+                    if (activeRun == null) {
+                        resetState()
+                        startMissionRun(MissionCatalog.bloodGas)
+                    }
+                    batteryLevel = 14.0
+                    fastBatteryDrain = true
+                    syncBattery()
+                    robot = robot.copy(hriVoiceStatus = "Batería baja: se recomienda regresar a punto seguro.")
+                    evaluateThresholds()
+                }
+                SimulationScenario.DISCONNECTION -> {
+                    _linkUp.value = false
+                }
+                SimulationScenario.INCIDENT -> {
+                    resetState()
+                    batteryLevel = 76.0
+                    syncBattery()
+                    startMissionRun(MissionCatalog.plasma, incidentAt = HospitalNode.FIRE_DOOR_PB)
+                }
+                SimulationScenario.COLD_CHAIN_FAILURE -> {
+                    if (activeRun == null) {
+                        resetState()
+                        startMissionRun(MissionCatalog.plasma)
+                    }
+                    coolingTargetC = FAILED_CAPSULE_TEMP_C
+                    robot = robot.copy(
+                        hriLedColor = LED_RED,
+                        hriVoiceStatus = "Alerta biológica: cadena de frío rota y manipulación detectada.",
+                        servicePayload = robot.servicePayload.copy(
+                            compartmentTempCelsius = FAILED_CAPSULE_TEMP_C,
+                            smartLockState = SmartLockState.TAMPER_ALERT
+                        )
+                    )
+                    activeRun?.track(FAILED_CAPSULE_TEMP_C, robot.servicePayload.bioSampleStabilityIndexG)
+                    evaluateThresholds()
+                }
+            }
+            publish()
+        }
+    }
+
+    private fun resetState() {
+        motionJob?.cancel()
+        obstacleJob?.cancel()
+        relockJob?.cancel()
+        activeRun = null
+        resumeTarget = null
+        obstaclePresent = false
+        fastBatteryDrain = false
+        batteryLevel = INITIAL_BATTERY
+        coolingTargetC = NOMINAL_CAPSULE_TEMP_C
+        activeConditions.clear()
+        queuedEvents.clear()
+        robot = initialRobotState()
+        _linkUp.value = true
+    }
+
+    private fun syncBattery() {
+        robot = robot.copy(
+            batteryPercentage = batteryLevel.toInt(),
+            estimatedMinutesLeft = (batteryLevel * OperationalLimits.FULL_BATTERY_AUTONOMY_MIN / 100).toInt()
+        )
+    }
+
+    private fun initialRobotState() = TelemetryState(
+        robotId = "G1-EDU-MED01",
+        firmwareVersion = "v2.4.1-DEX3",
+        connectionStatus = ConnectionStatus.ONLINE,
+        latencyMs = 42,
+        signalDbm = -35,
+        lastUpdatedTimestamp = clock(),
+        batteryPercentage = INITIAL_BATTERY.toInt(),
+        batteryTempCelsius = 28.5f,
+        estimatedMinutesLeft = (INITIAL_BATTERY * OperationalLimits.FULL_BATTERY_AUTONOMY_MIN / 100).toInt(),
+        operationalState = OperationalState.IDLE_AT_DOCK,
+        currentNode = HospitalNode.DOCK_BASE,
+        speedMps = 0f,
+        posture = RobotPosture.BIPED_STANDING,
+        hriLedColor = LED_CYAN,
+        hriVoiceStatus = "Sistema listo en base de carga.",
+        servicePayload = ServicePayloadTelemetry(
+            compartmentTempCelsius = NOMINAL_CAPSULE_TEMP_C,
+            bioSampleStabilityIndexG = 0.05f,
+            smartLockState = SmartLockState.SEALED_LOCKED
+        ),
+        activeAlerts = emptyList()
+    )
+
+    private fun shortId() = UUID.randomUUID().toString().take(8).uppercase()
+
+    private fun round1(v: Float) = Math.round(v * 10f) / 10f
+    private fun round2(v: Float) = Math.round(v * 100f) / 100f
+
+    private sealed interface Verdict {
+        data class Accepted(val message: String) : Verdict
+        data class Refused(val reason: String) : Verdict
+    }
+
+    private enum class AlertCondition { LOW_BATTERY, COLD_CHAIN, VIBRATION_WARNING, VIBRATION_CRITICAL, TAMPER }
+
+    private class MissionRun(
+        val config: MissionConfig,
+        val runId: String,
+        val startedAt: Long,
+        var routeIndex: Int,
+        var incidentAtNode: HospitalNode?,
+        var maxTemp: Float,
+        var maxVib: Float
+    ) {
+        fun track(temp: Float, vib: Float) {
+            maxTemp = max(maxTemp, temp)
+            maxVib = max(maxVib, vib)
+        }
+    }
+
+    private companion object {
+        const val INITIAL_BATTERY = 95.0
+        const val NORMAL_DRAIN_PER_TICK = 0.1
+        const val FAST_DRAIN_PER_TICK = 0.75
+        const val NOMINAL_CAPSULE_TEMP_C = 4.0f
+        const val FAILED_CAPSULE_TEMP_C = 8.4f
+        const val CRUISE_SPEED = 0.6f
+        const val RETURN_SPEED = 0.4f
+        const val MAX_ACKNOWLEDGED_ALERTS = 5
+
+        const val LED_CYAN = "#00F5D4"
+        const val LED_AMBER = "#FFAB00"
+        const val LED_RED = "#FF1744"
+        const val LED_GREEN = "#00E676"
+        const val LED_VIOLET = "#7C4DFF"
+
+        val ACTIVE_STATES = setOf(
+            OperationalState.EXECUTING_MISSION,
+            OperationalState.WAITING_ELEVATOR,
+            OperationalState.RETURNING_TO_SAFE_POINT,
+            OperationalState.AWAITING_NFC_HANDOFF,
+            OperationalState.INCIDENT_BLOCKED,
+            OperationalState.PAUSED
+        )
+    }
+}

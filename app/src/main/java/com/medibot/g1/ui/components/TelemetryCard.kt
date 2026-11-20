@@ -17,6 +17,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.medibot.g1.data.model.TelemetryCardState
@@ -77,7 +78,11 @@ fun TelemetryCard(
                     style = MaterialTheme.typography.labelSmall,
                     color = DarkOnSurface,
                     letterSpacing = 1.sp,
-                    maxLines = 1
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 6.dp)
                 )
 
                 if (effectiveState == TelemetryCardState.STALE) {
@@ -88,9 +93,10 @@ fun TelemetryCard(
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                     ) {
                         Text(
-                            text = "STALE (${staleSecondsAgo}s)",
+                            text = "hace ${staleSecondsAgo}s",
+                            maxLines = 1,
                             color = WarningAmber,
-                            fontSize = 9.sp,
+                            fontSize = 10.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }

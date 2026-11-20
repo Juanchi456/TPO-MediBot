@@ -18,17 +18,18 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.medibot.g1.data.model.ConnectionStatus
+import com.medibot.g1.data.repository.SimulationScenario
 import com.medibot.g1.ui.theme.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SimulatorControlBottomSheet(
-    connectionStatus: ConnectionStatus,
+    linkUp: Boolean,
     forceRejectNext: Boolean,
-    onInjectScenario: (Int) -> Unit,
+    onInjectScenario: (SimulationScenario) -> Unit,
     onToggleForceReject: (Boolean) -> Unit,
     onRestoreConnection: () -> Unit,
+    onResetSimulation: () -> Unit,
     onDismissRequest: () -> Unit
 ) {
     ModalBottomSheet(
@@ -116,8 +117,8 @@ fun SimulatorControlBottomSheet(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Restablecer Enlace (si está OFFLINE)
-            if (connectionStatus == ConnectionStatus.OFFLINE) {
+            // Restablecer Enlace (si el enlace simulado está caído)
+            if (!linkUp) {
                 Button(
                     onClick = {
                         onRestoreConnection()
@@ -139,6 +140,29 @@ fun SimulatorControlBottomSheet(
                 Spacer(modifier = Modifier.height(14.dp))
             }
 
+            OutlinedButton(
+                onClick = {
+                    onResetSimulation()
+                    onDismissRequest()
+                },
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = DarkOnBackground),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+            ) {
+                Icon(Icons.Default.RestartAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("REINICIAR SIMULACIÓN (ROBOT EN BASE)", fontWeight = FontWeight.Bold)
+            }
+            Text(
+                text = "Vuelve al estado inicial: sirve para salir de estados sin recuperación definida (agachado, detención, tamper).",
+                fontSize = 11.sp,
+                color = DarkOnSurface
+            )
+
+            Spacer(modifier = Modifier.height(14.dp))
+
             Text(
                 text = "5 ESCENARIOS OBLIGATORIOS:",
                 style = MaterialTheme.typography.labelSmall,
@@ -152,11 +176,11 @@ fun SimulatorControlBottomSheet(
             ScenarioButton(
                 number = 1,
                 title = "Misión Normal (Lab → UTI)",
-                desc = "Batería 85%, cápsula a 4.0°C. Avanza nodos cada 2s, solicita NFC en UTI y registra COMPLETED en Room.",
+                desc = "Batería 85%, cápsula a 4.0 °C. Recorre Lab → Cortafuego → Ascensor → P2 → UTI, valida NFC y registra COMPLETADA en Room.",
                 color = TerminalGreen,
                 icon = Icons.Default.CheckCircle,
                 onClick = {
-                    onInjectScenario(1)
+                    onInjectScenario(SimulationScenario.NORMAL_MISSION)
                     onDismissRequest()
                 }
             )
@@ -166,12 +190,12 @@ fun SimulatorControlBottomSheet(
             // Scenario 2
             ScenarioButton(
                 number = 2,
-                title = "Batería Baja (14% → 7%)",
-                desc = "Baja a 14% (alerta WARNING). A los 5s cae a 7% y adopta postura CROUCHED_SAFE_LOCK para prevenir caída.",
+                title = "Batería Baja (14% → < 8%)",
+                desc = "Durante una misión cae a 14% (alerta WARNING) y se descarga rápido. Acción: regresar a punto seguro. Si baja de 8%, se agacha (CROUCHED_SAFE_LOCK) y la misión queda FALLIDA.",
                 color = WarningAmber,
                 icon = Icons.Default.BatteryAlert,
                 onClick = {
-                    onInjectScenario(2)
+                    onInjectScenario(SimulationScenario.LOW_BATTERY)
                     onDismissRequest()
                 }
             )
@@ -182,11 +206,11 @@ fun SimulatorControlBottomSheet(
             ScenarioButton(
                 number = 3,
                 title = "Desconexión Wi-Fi 6 (Stale Telemetry)",
-                desc = "Corta enlace (OFFLINE). A los 4s la telemetría se vuelve STALE. Comandos caen en NO_RESPONSE tras 2.5s.",
+                desc = "Corta el enlace: el robot sigue operando pero la app deja de recibir datos. A los 4 s se marcan como antiguos; las órdenes quedan SIN RESPUESTA a los 2,5 s.",
                 color = CriticalRed,
                 icon = Icons.Default.SignalWifiConnectedNoInternet4,
                 onClick = {
-                    onInjectScenario(3)
+                    onInjectScenario(SimulationScenario.DISCONNECTION)
                     onDismissRequest()
                 }
             )
@@ -197,11 +221,11 @@ fun SimulatorControlBottomSheet(
             ScenarioButton(
                 number = 4,
                 title = "Incidente en Pasillo (Camilla a 0.35m)",
-                desc = "Frena en Puerta Cortafuego PB (INCIDENT_BLOCKED). Alerta CRITICAL. Exige decisión: Reanudar o Desviar.",
+                desc = "Frena en la puerta cortafuego (INCIDENT_BLOCKED). Reconocer la alerta habilita Reanudar; el robot lo rechaza hasta que el pasillo se despeja (~10 s). Alternativa: desviar a punto seguro.",
                 color = CriticalRed,
                 icon = Icons.Default.Warning,
                 onClick = {
-                    onInjectScenario(4)
+                    onInjectScenario(SimulationScenario.INCIDENT)
                     onDismissRequest()
                 }
             )
@@ -212,11 +236,11 @@ fun SimulatorControlBottomSheet(
             ScenarioButton(
                 number = 5,
                 title = "Cadena de Frío / Tamper (8.4°C)",
-                desc = "Cápsula sube a 8.4°C y activa TAMPER_ALERT. Exige ACK del operador y cancelación o retorno urgente.",
+                desc = "Durante una misión la cápsula sube a 8.4 °C y se activa TAMPER_ALERT. Exige ACK y cancelar o desviar. Se sale con Reiniciar simulación.",
                 color = ElectricViolet,
                 icon = Icons.Default.Thermostat,
                 onClick = {
-                    onInjectScenario(5)
+                    onInjectScenario(SimulationScenario.COLD_CHAIN_FAILURE)
                     onDismissRequest()
                 }
             )

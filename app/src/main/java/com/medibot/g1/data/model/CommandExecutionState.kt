@@ -1,21 +1,44 @@
 package com.medibot.g1.data.model
 
-sealed class CommandExecutionState {
-    data object Idle : CommandExecutionState()
+/**
+ * Ciclo de vida visible de una orden: enviar ≠ aceptar ≠ ejecutar.
+ * Estados excluyentes modelados con sealed interface (criterio de la cátedra).
+ */
+sealed interface CommandExecutionState {
+
+    data object Idle : CommandExecutionState
+
+    /** Toda orden emitida tiene identificador y hora de emisión (ver contrato JSON). */
+    sealed interface Tracked : CommandExecutionState {
+        val commandId: String
+        val commandName: String
+        val issuedAt: Long
+    }
+
     data class Pending(
-        val commandName: String,
-        val sentAt: Long = System.currentTimeMillis()
-    ) : CommandExecutionState()
+        override val commandId: String,
+        override val commandName: String,
+        override val issuedAt: Long
+    ) : Tracked
+
     data class Confirmed(
-        val commandName: String,
+        override val commandId: String,
+        override val commandName: String,
+        override val issuedAt: Long,
         val message: String
-    ) : CommandExecutionState()
+    ) : Tracked
+
     data class Rejected(
-        val commandName: String,
+        override val commandId: String,
+        override val commandName: String,
+        override val issuedAt: Long,
         val reason: String
-    ) : CommandExecutionState()
+    ) : Tracked
+
     data class NoResponse(
-        val commandName: String,
-        val timeoutMs: Long = 2500L
-    ) : CommandExecutionState()
+        override val commandId: String,
+        override val commandName: String,
+        override val issuedAt: Long,
+        val timeoutMs: Long
+    ) : Tracked
 }

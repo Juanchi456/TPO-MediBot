@@ -18,6 +18,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -35,7 +36,9 @@ fun HospitalMapCanvas(
     currentNode: HospitalNode,
     progressPct: Int,
     operationalState: OperationalState,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    missionName: String? = null,
+    isStale: Boolean = false
 ) {
     val nodes = listOf(
         HospitalNode.DOCK_BASE,
@@ -64,8 +67,9 @@ fun HospitalMapCanvas(
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
             .background(DarkSurface)
-            .border(1.dp, CardNormalBorder, RoundedCornerShape(16.dp))
+            .border(1.dp, if (isStale) CardStaleBorder else CardNormalBorder, RoundedCornerShape(16.dp))
             .padding(16.dp)
+            .alpha(if (isStale) 0.55f else 1f)
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
             // Header
@@ -198,7 +202,7 @@ fun HospitalMapCanvas(
                                     HospitalNode.SAFE_POINT_P2 -> "SEGURO"
                                     HospitalNode.UTI_NURSING -> "UTI"
                                 },
-                                fontSize = 9.sp,
+                                fontSize = 10.sp,
                                 fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
                                 color = if (isCurrent) nodeColor else DarkOnSurface.copy(alpha = 0.7f),
                                 maxLines = 1
@@ -233,7 +237,7 @@ fun HospitalMapCanvas(
 
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
-                        text = "PROGRESO MISIÓN",
+                        text = if (isStale) "PROGRESO (DATO ANTIGUO)" else "PROGRESO MISIÓN",
                         style = MaterialTheme.typography.labelSmall,
                         color = DarkOnSurface,
                         letterSpacing = 0.5.sp
@@ -246,6 +250,12 @@ fun HospitalMapCanvas(
                     )
                 }
             }
+
+            Text(
+                text = missionName?.let { "Misión: $it" } ?: "Sin misión activa",
+                style = MaterialTheme.typography.bodySmall,
+                color = DarkOnSurface
+            )
 
             Spacer(modifier = Modifier.height(8.dp))
 

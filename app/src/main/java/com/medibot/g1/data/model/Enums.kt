@@ -29,8 +29,13 @@ enum class SmartLockState(val displayName: String) {
 
 enum class AlertSeverity { INFO, WARNING, CRITICAL }
 
-enum class CommandExecutionStatus { IDLE, PENDING, CONFIRMED, REJECTED, NO_RESPONSE }
+enum class MissionStatus(val label: String) {
+    IN_PROGRESS("En curso"),
+    COMPLETED("Completada"),
+    CANCELLED("Cancelada"),
+    FAILED("Fallida")
+}
 
-enum class MissionStatus { IN_PROGRESS, COMPLETED, CANCELLED, FAILED }
+enum class EventCategory { SYSTEM, MISSION, COMMAND, ALERT, SCENARIO }
 
 enum class TelemetryCardState { NORMAL, WARNING, ERROR, STALE }

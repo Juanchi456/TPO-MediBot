@@ -5,6 +5,8 @@ data class RobotAlert(
     val severity: AlertSeverity,
     val title: String,
     val message: String,
-    val timestamp: Long = System.currentTimeMillis(),
-    val isAcknowledged: Boolean = false
+    val timestamp: Long,
+    val isAcknowledged: Boolean = false,
+    val acknowledgedAt: Long? = null,
+    val relatedMissionId: String? = null
 )

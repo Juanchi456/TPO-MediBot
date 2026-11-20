@@ -8,6 +8,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -22,20 +23,27 @@ import com.medibot.g1.data.model.*
 import com.medibot.g1.ui.components.*
 import com.medibot.g1.ui.theme.*
 import com.medibot.g1.ui.viewmodel.SupervisionUiState
+import com.medibot.g1.domain.OperationalLimits
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.draw.alpha
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun DashboardScreen(
     uiState: SupervisionUiState,
     onSendCommand: (RobotCommand) -> Unit,
     onAcknowledgeAlert: (String) -> Unit,
-    onResetCommandFeedback: () -> Unit,
+    onDismissCommandFeedback: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var showEmergencyConfirmDialog by remember { mutableStateOf(false) }
+    var showEmergencyConfirmDialog by rememberSaveable { mutableStateOf(false) }
 
     val telemetry = uiState.telemetry
     val isStale = uiState.isTelemetryStale
-    val staleSeconds = uiState.staleSecondsAgo
+    val staleSeconds = uiState.secondsSinceUpdate
+    val timeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
 
     Column(
         modifier = modifier
@@ -60,7 +68,7 @@ fun DashboardScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // Connectivity Pill
-                    val statusColor = when (telemetry.connectionStatus) {
+                    val statusColor = when (uiState.linkStatus) {
                         ConnectionStatus.ONLINE -> TerminalGreen
                         ConnectionStatus.DEGRADED -> WarningAmber
                         ConnectionStatus.OFFLINE -> CriticalRed
@@ -75,7 +83,11 @@ fun DashboardScreen(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "${telemetry.connectionStatus.name} (${telemetry.latencyMs}ms / ${telemetry.signalDbm}dBm)",
+                            text = if (isStale) {
+                                "SIN ENLACE"
+                            } else {
+                                "${uiState.linkStatus.name} (${telemetry.latencyMs}ms / ${telemetry.signalDbm}dBm)"
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = statusColor,
                             fontWeight = FontWeight.Bold
@@ -108,8 +120,8 @@ fun DashboardScreen(
                             contentColor = Color.White
                         ),
                         shape = RoundedCornerShape(8.dp),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                        modifier = Modifier.height(32.dp)
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        modifier = Modifier.heightIn(min = 48.dp)
                     ) {
                         Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
@@ -117,7 +129,17 @@ fun DashboardScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // Última actualización: siempre visible (no solo cuando el dato es antiguo)
+                Text(
+                    text = "Última actualización: ${timeFormat.format(Date(uiState.lastUpdateTimestamp))} · hace ${uiState.secondsSinceUpdate} s",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (isStale) WarningAmber else DarkOnSurface,
+                    fontWeight = if (isStale) FontWeight.Bold else FontWeight.Normal
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
 
                 // Battery Row
                 Row(
@@ -159,7 +181,9 @@ fun DashboardScreen(
         // Active Alerts Banner
         AlertBanner(
             alerts = telemetry.activeAlerts,
-            onAcknowledgeAlert = onAcknowledgeAlert
+            canAcknowledge = uiState.availability.acknowledge,
+            onAcknowledgeAlert = onAcknowledgeAlert,
+            isStale = isStale
         )
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -168,7 +192,9 @@ fun DashboardScreen(
         HospitalMapCanvas(
             currentNode = telemetry.currentNode,
             progressPct = telemetry.missionProgressPct,
-            operationalState = telemetry.operationalState
+            operationalState = telemetry.operationalState,
+            missionName = telemetry.currentMission?.name,
+            isStale = isStale
         )
 
         Spacer(modifier = Modifier.height(14.dp))
@@ -186,15 +212,15 @@ fun DashboardScreen(
         // 3 Specific Medical Variables Grid
         val tempVal = telemetry.servicePayload.compartmentTempCelsius
         val tempState = when {
-            tempVal > 6.5f -> TelemetryCardState.ERROR
-            tempVal > 6.0f -> TelemetryCardState.WARNING
+            tempVal > OperationalLimits.COLD_CHAIN_BREAK_TEMP_C -> TelemetryCardState.ERROR
+            tempVal > OperationalLimits.MAX_START_TEMP_C -> TelemetryCardState.WARNING
             else -> TelemetryCardState.NORMAL
         }
 
         val stabVal = telemetry.servicePayload.bioSampleStabilityIndexG
         val stabState = when {
-            stabVal > 0.60f -> TelemetryCardState.ERROR
-            stabVal > 0.30f -> TelemetryCardState.WARNING
+            stabVal > OperationalLimits.VIBRATION_CRITICAL_G -> TelemetryCardState.ERROR
+            stabVal > OperationalLimits.VIBRATION_WARNING_G -> TelemetryCardState.WARNING
             else -> TelemetryCardState.NORMAL
         }
 
@@ -212,7 +238,7 @@ fun DashboardScreen(
                 title = "Temperatura Cápsula",
                 value = String.format("%.1f", tempVal),
                 unit = "°C",
-                subtitle = if (tempVal > 6.5f) "¡CADENA ROTA!" else "Normal (2-6°C)",
+                subtitle = if (tempVal > OperationalLimits.COLD_CHAIN_BREAK_TEMP_C) "¡CADENA ROTA!" else "Rango seguro 2–6 °C",
                 icon = Icons.Default.Thermostat,
                 cardState = tempState,
                 isStale = isStale,
@@ -224,7 +250,7 @@ fun DashboardScreen(
                 title = "Estabilidad Tubos",
                 value = String.format("%.2f", stabVal),
                 unit = "G",
-                subtitle = if (stabVal > 0.60f) "¡RIESGO HEMÓLISIS!" else "Vibración < 0.30G",
+                subtitle = if (stabVal > OperationalLimits.VIBRATION_CRITICAL_G) "¡RIESGO HEMÓLISIS!" else "Normal < 0.30 G",
                 icon = Icons.Default.Vibration,
                 cardState = stabState,
                 isStale = isStale,
@@ -275,7 +301,7 @@ fun DashboardScreen(
                 title = "Estado Operativo",
                 value = telemetry.operationalState.displayName,
                 subtitle = "Postura: ${telemetry.posture.displayName}",
-                icon = Icons.Default.DirectionsWalk,
+                icon = Icons.AutoMirrored.Filled.DirectionsWalk,
                 cardState = when (telemetry.operationalState) {
                     OperationalState.INCIDENT_BLOCKED, OperationalState.EMERGENCY_STOPPED -> TelemetryCardState.ERROR
                     OperationalState.PAUSED, OperationalState.LOW_BATTERY_CROUCHED -> TelemetryCardState.WARNING
@@ -290,9 +316,9 @@ fun DashboardScreen(
                 title = "Velocidad Bípeda",
                 value = String.format("%.2f", telemetry.speedMps),
                 unit = "m/s",
-                subtitle = "Límite: 0.8 m/s",
+                subtitle = "Límite: ${OperationalLimits.MAX_SPEED_MPS} m/s",
                 icon = Icons.Default.Speed,
-                cardState = TelemetryCardState.NORMAL,
+                cardState = if (telemetry.speedMps > OperationalLimits.MAX_SPEED_MPS) TelemetryCardState.WARNING else TelemetryCardState.NORMAL,
                 isStale = isStale,
                 staleSecondsAgo = staleSeconds,
                 modifier = Modifier.weight(1f)
@@ -307,8 +333,9 @@ fun DashboardScreen(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(12.dp))
                 .background(DarkSurfaceVariant)
-                .border(1.dp, CardNormalBorder, RoundedCornerShape(12.dp))
+                .border(1.dp, if (isStale) CardStaleBorder else CardNormalBorder, RoundedCornerShape(12.dp))
                 .padding(12.dp)
+                .alpha(if (isStale) 0.55f else 1f)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -358,56 +385,28 @@ fun DashboardScreen(
 
         // Discrete Command Console
         CommandControlPanel(
-            operationalState = telemetry.operationalState,
+            availability = uiState.availability,
             commandState = uiState.commandState,
             onSendCommand = onSendCommand,
-            onResetFeedback = onResetCommandFeedback
+            onDismissFeedback = onDismissCommandFeedback
         )
 
-        Spacer(modifier = Modifier.height(24.dp))
+        // Espacio para que el botón flotante del panel de ingeniería no tape controles
+        Spacer(modifier = Modifier.height(96.dp))
     }
 
-    // Rapid Emergency Confirmation Dialog
+    // Confirmación de la detención operativa (riesgo 1: órdenes accidentales)
     if (showEmergencyConfirmDialog) {
-        AlertDialog(
-            onDismissRequest = { showEmergencyConfirmDialog = false },
-            title = {
-                Text(
-                    text = "CONFIRMAR DETENCIÓN OPERATIVA",
-                    color = CriticalRed,
-                    fontWeight = FontWeight.Bold
-                )
+        ConfirmActionDialog(
+            title = "CONFIRMAR DETENCIÓN OPERATIVA",
+            message = "El robot frena de inmediato y queda inmóvil. Es un comando de software: no reemplaza la parada física de emergencia.",
+            confirmLabel = "DETENER AHORA",
+            accentColor = CriticalRed,
+            onConfirm = {
+                showEmergencyConfirmDialog = false
+                onSendCommand(RobotCommand.OperationalStop)
             },
-            text = {
-                Text(
-                    text = "¿Desea detener inmediatamente el desplazamiento del robot humanoide? El robot bloqueará articulaciones y quedará inmóvil.",
-                    color = DarkOnBackground
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showEmergencyConfirmDialog = false
-                        onSendCommand(RobotCommand.OperationalStop)
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = CriticalRed,
-                        contentColor = Color.White
-                    )
-                ) {
-                    Text("DETENER AHORA", fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                OutlinedButton(
-                    onClick = { showEmergencyConfirmDialog = false },
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = DarkOnSurface)
-                ) {
-                    Text("CANCELAR")
-                }
-            },
-            containerColor = DarkSurface,
-            shape = RoundedCornerShape(16.dp)
+            onDismiss = { showEmergencyConfirmDialog = false }
         )
     }
 }

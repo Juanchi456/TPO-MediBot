@@ -14,6 +14,8 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -24,20 +26,35 @@ import androidx.compose.ui.unit.sp
 import com.medibot.g1.data.model.AlertSeverity
 import com.medibot.g1.data.model.RobotAlert
 import com.medibot.g1.ui.theme.*
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun AlertBanner(
     alerts: List<RobotAlert>,
+    canAcknowledge: Boolean,
     onAcknowledgeAlert: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isStale: Boolean = false
 ) {
     if (alerts.isEmpty()) return
 
+    // Primero lo que exige acción: sin reconocer, por severidad y luego las más recientes.
+    val ordered = alerts.sortedWith(
+        compareBy<RobotAlert> { it.isAcknowledged }
+            .thenByDescending { it.severity.ordinal }
+            .thenByDescending { it.timestamp }
+    )
+    val timeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+
     Column(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .alpha(if (isStale) 0.55f else 1f),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        alerts.forEach { alert ->
+        ordered.forEach { alert ->
             val color = when (alert.severity) {
                 AlertSeverity.CRITICAL -> CriticalRed
                 AlertSeverity.WARNING -> WarningAmber
@@ -64,7 +81,7 @@ fun AlertBanner(
                 ) {
                     Icon(
                         imageVector = icon,
-                        contentDescription = null,
+                        contentDescription = "Severidad ${alert.severity.name}",
                         tint = color,
                         modifier = Modifier
                             .size(24.dp)
@@ -83,7 +100,8 @@ fun AlertBanner(
                                 text = alert.title,
                                 style = MaterialTheme.typography.titleMedium,
                                 color = color,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.weight(1f)
                             )
 
                             if (alert.isAcknowledged) {
@@ -96,9 +114,10 @@ fun AlertBanner(
                                     )
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text(
-                                        text = "ACK",
+                                        text = alert.acknowledgedAt
+                                            ?.let { "ACK ${timeFormat.format(Date(it))}" } ?: "ACK",
                                         color = TerminalGreen,
-                                        fontSize = 10.sp,
+                                        fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold
                                     )
                                 }
@@ -114,21 +133,30 @@ fun AlertBanner(
                             lineHeight = 16.sp
                         )
 
+                        Text(
+                            text = "Emitida ${timeFormat.format(Date(alert.timestamp))}",
+                            fontSize = 11.sp,
+                            color = DarkOnSurface
+                        )
+
                         if (!alert.isAcknowledged) {
                             Spacer(modifier = Modifier.height(8.dp))
                             Button(
                                 onClick = { onAcknowledgeAlert(alert.id) },
+                                enabled = canAcknowledge,
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = color,
-                                    contentColor = DarkBackground
+                                    contentColor = DarkBackground,
+                                    disabledContainerColor = DarkSurfaceVariant,
+                                    disabledContentColor = StaleGray
                                 ),
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                modifier = Modifier.height(28.dp),
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                                modifier = Modifier.heightIn(min = 48.dp),
                                 shape = RoundedCornerShape(6.dp)
                             ) {
                                 Text(
                                     text = "RECONOCER (ACK)",
-                                    fontSize = 11.sp,
+                                    fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             }

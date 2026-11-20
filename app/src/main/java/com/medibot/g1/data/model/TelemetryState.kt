@@ -9,9 +9,11 @@ data class TelemetryState(
     val lastUpdatedTimestamp: Long = System.currentTimeMillis(),
     val batteryPercentage: Int = 95,
     val batteryTempCelsius: Float = 28.5f,
-    val estimatedMinutesLeft: Int = 190,
+    val estimatedMinutesLeft: Int = 114,
     val operationalState: OperationalState = OperationalState.IDLE_AT_DOCK,
     val currentMission: MissionConfig? = null,
+    /** Identificador de la ejecución en curso (distinto en cada despacho). */
+    val missionRunId: String? = null,
     val missionProgressPct: Int = 0,
     val currentNode: HospitalNode = HospitalNode.DOCK_BASE,
     val speedMps: Float = 0.0f,

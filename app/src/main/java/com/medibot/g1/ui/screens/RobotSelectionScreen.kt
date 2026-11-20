@@ -8,6 +8,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -26,6 +27,7 @@ import com.medibot.g1.ui.theme.*
 @Composable
 fun RobotSelectionScreen(
     telemetry: TelemetryState,
+    linkStatus: ConnectionStatus,
     onNavigateToDashboard: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -126,7 +128,7 @@ fun RobotSelectionScreen(
                     }
 
                     // Online indicator
-                    val statusColor = when (telemetry.connectionStatus) {
+                    val statusColor = when (linkStatus) {
                         ConnectionStatus.ONLINE -> TerminalGreen
                         ConnectionStatus.DEGRADED -> WarningAmber
                         ConnectionStatus.OFFLINE -> CriticalRed
@@ -146,7 +148,7 @@ fun RobotSelectionScreen(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = telemetry.connectionStatus.name,
+                            text = linkStatus.name,
                             color = statusColor,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold
@@ -156,7 +158,7 @@ fun RobotSelectionScreen(
 
                 Spacer(modifier = Modifier.height(18.dp))
 
-                Divider(color = CardNormalBorder, thickness = 1.dp)
+                HorizontalDivider(color = CardNormalBorder, thickness = 1.dp)
 
                 Spacer(modifier = Modifier.height(16.dp))
 
@@ -174,7 +176,7 @@ fun RobotSelectionScreen(
                 TechSpecRow(icon = Icons.Default.Visibility, label = "Cámaras RGB-D", value = "Intel RealSense D435i (Estéreo + IMU)")
                 TechSpecRow(icon = Icons.Default.PanTool, label = "Manipuladores", value = "Unitree Dex3-1 (Manos diestras con feedback)")
                 TechSpecRow(icon = Icons.Default.AcUnit, label = "Cápsula Médica", value = "Módulo Peltier Activo (2.0°C - 6.0°C)")
-                TechSpecRow(icon = Icons.Default.DirectionsWalk, label = "Cinemática Bípeda", value = "23 DOF, actuadores 120Nm, 35kg")
+                TechSpecRow(icon = Icons.AutoMirrored.Filled.DirectionsWalk, label = "Cinemática Bípeda", value = "23 DOF, actuadores 120Nm, 35kg")
 
                 Spacer(modifier = Modifier.height(18.dp))
 
