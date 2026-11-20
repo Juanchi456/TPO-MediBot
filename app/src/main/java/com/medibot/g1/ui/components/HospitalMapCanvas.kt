@@ -24,6 +24,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -65,6 +67,13 @@ fun HospitalMapCanvas(
     Box(
         modifier = modifier
             .fillMaxWidth()
+            .semantics(mergeDescendants = true) {
+                contentDescription = buildString {
+                    append("Mapa del recorrido. Posición actual: ${currentNode.displayName}. ")
+                    append("Progreso de misión: $progressPct por ciento.")
+                    if (isStale) append(" Dato antiguo.")
+                }
+            }
             .clip(RoundedCornerShape(16.dp))
             .background(DarkSurface)
             .border(1.dp, if (isStale) CardStaleBorder else CardNormalBorder, RoundedCornerShape(16.dp))

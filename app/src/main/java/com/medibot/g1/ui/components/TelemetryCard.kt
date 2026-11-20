@@ -16,6 +16,8 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -56,8 +58,18 @@ fun TelemetryCard(
         TelemetryCardState.STALE -> StaleGray
     }
 
+    val spokenState = when (effectiveState) {
+        TelemetryCardState.NORMAL -> "normal"
+        TelemetryCardState.WARNING -> "advertencia"
+        TelemetryCardState.ERROR -> "crítico"
+        TelemetryCardState.STALE -> "dato antiguo de $staleSecondsAgo segundos"
+    }
+
     Box(
         modifier = modifier
+            .semantics(mergeDescendants = true) {
+                contentDescription = "$title: $value $unit. Estado $spokenState."
+            }
             .clip(RoundedCornerShape(12.dp))
             .background(DarkSurfaceVariant)
             .border(1.5.dp, borderColor, RoundedCornerShape(12.dp))
