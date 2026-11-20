@@ -25,9 +25,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.medibot.g1.data.model.ConnectionStatus
+import com.medibot.g1.data.model.ConsoleRole
+import com.medibot.g1.data.model.ConsoleSession
 import com.medibot.g1.data.model.RobotProfile
 import com.medibot.g1.data.model.TelemetryState
 import com.medibot.g1.ui.components.ConfirmActionDialog
+import com.medibot.g1.ui.components.ConnectConsoleDialog
 import com.medibot.g1.ui.theme.*
 
 /**
@@ -37,18 +40,20 @@ import com.medibot.g1.ui.theme.*
 @Composable
 fun RobotSelectionScreen(
     fleet: List<RobotProfile>,
-    connectedRobot: RobotProfile?,
+    session: ConsoleSession?,
     telemetry: TelemetryState,
     linkStatus: ConnectionStatus,
-    onConnect: (String) -> Unit,
+    onConnect: (robotId: String, operatorId: String, role: ConsoleRole) -> Boolean,
     onDisconnect: () -> Unit,
     onOpenConsole: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val connectedRobot = session?.robot
     var selectedId by rememberSaveable {
         mutableStateOf(connectedRobot?.robotId ?: fleet.firstOrNull { it.isAvailable }?.robotId)
     }
     var showDisconnectConfirmation by rememberSaveable { mutableStateOf(false) }
+    var showConnectDialog by rememberSaveable { mutableStateOf(false) }
     val selected = fleet.firstOrNull { it.robotId == selectedId }
     val isSelectedConnected = selected != null && selected.robotId == connectedRobot?.robotId
 
@@ -73,7 +78,7 @@ fun RobotSelectionScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        ConnectionSummary(connectedRobot = connectedRobot, linkStatus = linkStatus)
+        ConnectionSummary(session = session, linkStatus = linkStatus)
 
         Spacer(modifier = Modifier.height(16.dp))
 
@@ -97,7 +102,7 @@ fun RobotSelectionScreen(
                 isConnected = isSelectedConnected,
                 otherRobotConnected = connectedRobot != null && !isSelectedConnected,
                 telemetry = telemetry,
-                onConnect = { onConnect(selected.robotId) },
+                onConnect = { showConnectDialog = true },
                 onOpenConsole = onOpenConsole,
                 onDisconnect = { showDisconnectConfirmation = true }
             )
@@ -109,6 +114,16 @@ fun RobotSelectionScreen(
 
         // Espacio para que el botón flotante del panel de ingeniería no tape controles
         Spacer(modifier = Modifier.height(96.dp))
+    }
+
+    if (showConnectDialog && selected != null) {
+        ConnectConsoleDialog(
+            robotName = selected.displayName,
+            onConfirm = { operatorId, role ->
+                onConnect(selected.robotId, operatorId, role).also { ok -> if (ok) showConnectDialog = false }
+            },
+            onDismiss = { showConnectDialog = false }
+        )
     }
 
     if (showDisconnectConfirmation) {
@@ -132,8 +147,8 @@ fun RobotSelectionScreen(
 }
 
 @Composable
-private fun ConnectionSummary(connectedRobot: RobotProfile?, linkStatus: ConnectionStatus) {
-    val connected = connectedRobot != null
+private fun ConnectionSummary(session: ConsoleSession?, linkStatus: ConnectionStatus) {
+    val connected = session != null
     val color = when {
         !connected -> StaleGray
         linkStatus == ConnectionStatus.ONLINE -> TerminalGreen
@@ -157,8 +172,8 @@ private fun ConnectionSummary(connectedRobot: RobotProfile?, linkStatus: Connect
         )
         Spacer(modifier = Modifier.width(10.dp))
         Text(
-            text = if (connectedRobot != null) {
-                "Consola conectada a ${connectedRobot.displayName} · enlace ${linkStatus.name}"
+            text = if (session != null) {
+                "Consola conectada a ${session.robot.displayName} · ${session.operatorId} (${session.role.displayName}) · enlace ${linkStatus.name}"
             } else {
                 "Consola desconectada: seleccione un robot disponible y conéctese."
             },

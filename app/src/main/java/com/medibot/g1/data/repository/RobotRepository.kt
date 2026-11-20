@@ -21,8 +21,11 @@ interface RobotRepository {
     /** Eventos discretos (alertas emitidas, misiones finalizadas). */
     val events: Flow<RobotEvent>
 
-    /** Envía una orden y suspende hasta que se confirma, se rechaza o vence el timeout. */
-    suspend fun sendCommand(command: RobotCommand): CommandExecutionState
+    /**
+     * Envía una orden en nombre de [operatorId] y suspende hasta que se confirma,
+     * se rechaza o vence el timeout.
+     */
+    suspend fun sendCommand(command: RobotCommand, operatorId: String): CommandExecutionState
 }
 
 enum class SimulationScenario(val title: String) {

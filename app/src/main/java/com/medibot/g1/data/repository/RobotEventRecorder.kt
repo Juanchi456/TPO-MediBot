@@ -64,19 +64,22 @@ class RobotEventRecorder(
                         EventCategory.COMMAND,
                         AlertSeverity.INFO,
                         "Orden confirmada: ${state.commandName}",
-                        "[${state.commandId}] ${state.message}"
+                        "[${state.commandId}] ${state.message}",
+                        operatorId = state.operatorId
                     )
                     is CommandExecutionState.Rejected -> audit.logEvent(
                         EventCategory.COMMAND,
                         AlertSeverity.WARNING,
                         "Orden rechazada: ${state.commandName}",
-                        "[${state.commandId}] Motivo: ${state.reason}"
+                        "[${state.commandId}] Motivo: ${state.reason}",
+                        operatorId = state.operatorId
                     )
                     is CommandExecutionState.NoResponse -> audit.logEvent(
                         EventCategory.COMMAND,
                         AlertSeverity.CRITICAL,
                         "Orden sin respuesta: ${state.commandName}",
-                        "[${state.commandId}] Sin confirmación del robot tras ${state.timeoutMs} ms. No se sabe si se ejecutó."
+                        "[${state.commandId}] Sin confirmación del robot tras ${state.timeoutMs} ms. No se sabe si se ejecutó.",
+                        operatorId = state.operatorId
                     )
                     is CommandExecutionState.Pending, CommandExecutionState.Idle -> Unit
                 }

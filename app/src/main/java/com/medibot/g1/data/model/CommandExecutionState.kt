@@ -13,32 +13,39 @@ sealed interface CommandExecutionState {
         val commandId: String
         val commandName: String
         val issuedAt: Long
+
+        /** Quién emitió la orden (operatorId del contrato JSON). */
+        val operatorId: String?
     }
 
     data class Pending(
         override val commandId: String,
         override val commandName: String,
-        override val issuedAt: Long
+        override val issuedAt: Long,
+        override val operatorId: String? = null
     ) : Tracked
 
     data class Confirmed(
         override val commandId: String,
         override val commandName: String,
         override val issuedAt: Long,
-        val message: String
+        val message: String,
+        override val operatorId: String? = null
     ) : Tracked
 
     data class Rejected(
         override val commandId: String,
         override val commandName: String,
         override val issuedAt: Long,
-        val reason: String
+        val reason: String,
+        override val operatorId: String? = null
     ) : Tracked
 
     data class NoResponse(
         override val commandId: String,
         override val commandName: String,
         override val issuedAt: Long,
-        val timeoutMs: Long
+        val timeoutMs: Long,
+        override val operatorId: String? = null
     ) : Tracked
 }

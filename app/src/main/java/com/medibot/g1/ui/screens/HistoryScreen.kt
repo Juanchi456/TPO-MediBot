@@ -22,7 +22,6 @@ import com.medibot.g1.data.model.AlertSeverity
 import com.medibot.g1.data.model.EventRecord
 import com.medibot.g1.data.model.MissionRecord
 import com.medibot.g1.data.model.MissionStatus
-import com.medibot.g1.ui.components.ConfirmActionDialog
 import androidx.compose.runtime.saveable.rememberSaveable
 import com.medibot.g1.ui.theme.*
 import java.text.SimpleDateFormat
@@ -32,12 +31,9 @@ import java.util.*
 fun HistoryScreen(
     missionsHistory: List<MissionRecord>,
     eventLogs: List<EventRecord>,
-    onInsertSeedData: () -> Unit,
-    onClearHistory: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
-    var showClearConfirmation by rememberSaveable { mutableStateOf(false) }
     val tabs = listOf("MISIONES EJECUTADAS", "AUDITORÍA / EVENTOS")
 
     Column(
@@ -56,41 +52,12 @@ fun HistoryScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "Persistencia local SQLite en tiempo real",
+                    text = "Solo lectura · persistencia local (Room)",
                     fontSize = 11.sp,
                     color = DarkOnSurface
                 )
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = onInsertSeedData,
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                    shape = RoundedCornerShape(6.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = NeonCyan),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, NeonCyan),
-                    modifier = Modifier.heightIn(min = 40.dp)
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("DATOS DE EJEMPLO", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                }
-
-                OutlinedButton(
-                    onClick = { showClearConfirmation = true },
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                    shape = RoundedCornerShape(6.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = CriticalRed),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, CriticalRed),
-                    modifier = Modifier.heightIn(min = 40.dp)
-                ) {
-                    Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(14.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("BORRAR HISTORIAL", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                }
-            }
         }
 
         Spacer(modifier = Modifier.height(14.dp))
@@ -128,25 +95,12 @@ fun HistoryScreen(
         }
     }
 
-    if (showClearConfirmation) {
-        ConfirmActionDialog(
-            title = "¿Borrar historial y auditoría?",
-            message = "Se eliminan todas las misiones y eventos registrados en el dispositivo. No se puede deshacer.",
-            confirmLabel = "BORRAR TODO",
-            accentColor = CriticalRed,
-            onConfirm = {
-                showClearConfirmation = false
-                onClearHistory()
-            },
-            onDismiss = { showClearConfirmation = false }
-        )
-    }
 }
 
 @Composable
 private fun MissionsTabContent(missions: List<MissionRecord>) {
     if (missions.isEmpty()) {
-        EmptyState(message = "No hay misiones persistidas en Room.\nEjecute el Escenario 1 o pulse 'DATOS DE EJEMPLO'.")
+        EmptyState(message = "No hay misiones persistidas en Room.\nEjecute un escenario o cargue datos de ejemplo desde el panel de ingeniería.")
     } else {
         val dateFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
 
@@ -339,7 +293,7 @@ private fun EventsTabContent(events: List<EventRecord>) {
                                     .padding(horizontal = 6.dp, vertical = 2.dp)
                             ) {
                                 Text(
-                                    text = "${event.category} • ${event.severity}",
+                                    text = listOfNotNull(event.category.name, event.severity.name, event.operatorId).joinToString(" • "),
                                     fontSize = 9.sp,
                                     color = severityColor,
                                     fontWeight = FontWeight.SemiBold

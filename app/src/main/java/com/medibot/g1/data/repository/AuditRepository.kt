@@ -25,7 +25,8 @@ interface AuditRepository {
         severity: AlertSeverity,
         title: String,
         details: String,
-        relatedMissionId: String? = null
+        relatedMissionId: String? = null,
+        operatorId: String? = null
     )
 
     suspend fun saveMission(outcome: MissionOutcome)
@@ -52,7 +53,8 @@ class RoomAuditRepository(
         severity: AlertSeverity,
         title: String,
         details: String,
-        relatedMissionId: String?
+        relatedMissionId: String?,
+        operatorId: String?
     ) {
         eventDao.insertEvent(
             EventLogEntity(
@@ -61,7 +63,8 @@ class RoomAuditRepository(
                 severity = severity.name,
                 title = title,
                 details = details,
-                relatedMissionId = relatedMissionId
+                relatedMissionId = relatedMissionId,
+                operatorId = operatorId
             )
         )
     }
@@ -178,5 +181,6 @@ private fun EventLogEntity.toRecord() = EventRecord(
     severity = enumOrDefault(severity, AlertSeverity.INFO),
     title = title,
     details = details,
-    relatedMissionId = relatedMissionId
+    relatedMissionId = relatedMissionId,
+    operatorId = operatorId
 )

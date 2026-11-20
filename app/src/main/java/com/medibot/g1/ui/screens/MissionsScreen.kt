@@ -32,7 +32,8 @@ fun MissionsScreen(
     preconditions: List<Precondition>,
     canStart: Boolean,
     onStartMission: (MissionConfig) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    readOnlyReason: String? = null
 ) {
     var selectedMissionIndex by rememberSaveable { mutableIntStateOf(0) }
     val selectedMission = catalog[selectedMissionIndex.coerceIn(0, catalog.lastIndex)]
@@ -201,7 +202,7 @@ fun MissionsScreen(
                                 .padding(end = 8.dp)
                         )
                         Text(
-                            text = "Vib. máx ${mission.maxVibrationG} G",
+                            text = "Cápsula ${mission.requiredTempRange.start.toInt()}–${mission.requiredTempRange.endInclusive.toInt()} °C · Vib. máx ${mission.maxVibrationG} G",
                             maxLines = 1,
                             fontSize = 10.sp,
                             color = DarkOnSurface
@@ -212,6 +213,16 @@ fun MissionsScreen(
         }
 
         Spacer(modifier = Modifier.height(20.dp))
+
+        if (readOnlyReason != null) {
+            Text(
+                text = readOnlyReason,
+                color = WarningAmber,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+        }
 
         // Dispatch Button
         Button(

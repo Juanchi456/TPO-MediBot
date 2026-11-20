@@ -37,7 +37,8 @@ fun CommandControlPanel(
     commandState: CommandExecutionState,
     onSendCommand: (RobotCommand) -> Unit,
     onDismissFeedback: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    readOnlyReason: String? = null
 ) {
     var confirmation by rememberSaveable { mutableStateOf<PendingConfirmation?>(null) }
 
@@ -69,6 +70,23 @@ fun CommandControlPanel(
             Spacer(modifier = Modifier.height(10.dp))
 
             SafetyDisclaimer()
+
+            if (readOnlyReason != null) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(StaleGray.copy(alpha = 0.15f))
+                        .border(1.dp, StaleGray, RoundedCornerShape(8.dp))
+                        .padding(10.dp)
+                ) {
+                    Icon(Icons.Default.Visibility, contentDescription = null, tint = WarningAmber, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(readOnlyReason, fontSize = 12.sp, color = WarningAmber, fontWeight = FontWeight.SemiBold)
+                }
+            }
 
             Spacer(modifier = Modifier.height(14.dp))
 

@@ -35,7 +35,7 @@ object MissionCatalog {
         maxVibrationG = 0.25f
     )
 
-    // TODO(definir): el rango 15–25 °C no es compatible con la precondición de inicio ≤ 6 °C.
+    // Medicación a temperatura ambiente: la cápsula se acondiciona a 15–25 °C al despachar.
     val pharmacy = MissionConfig(
         missionId = "MED-03-FAR",
         name = "Farmacia: Medicación Controlada → Piso 2",

@@ -11,6 +11,8 @@ import com.medibot.g1.MediBotApplication
 import com.medibot.g1.data.model.AlertSeverity
 import com.medibot.g1.data.model.CommandExecutionState
 import com.medibot.g1.data.model.ConnectionStatus
+import com.medibot.g1.data.model.ConsoleRole
+import com.medibot.g1.data.model.ConsoleSession
 import com.medibot.g1.data.model.EventCategory
 import com.medibot.g1.data.model.EventRecord
 import com.medibot.g1.data.model.FleetCatalog
@@ -51,16 +53,20 @@ data class SupervisionUiState(
     val startPreconditions: List<Precondition> = emptyList(),
     val forceRejectNext: Boolean = false,
     val simulatorLinkUp: Boolean = true,
-    /** Robot al que está conectada la consola; null = consola desconectada. */
-    val connectedRobot: RobotProfile? = null
+    /** Sesión de consola (robot, operador y rol); null = consola desconectada. */
+    val session: ConsoleSession? = null
 ) {
-    val isConsoleConnected: Boolean get() = connectedRobot != null
+    val connectedRobot: RobotProfile? get() = session?.robot
+    val isConsoleConnected: Boolean get() = session != null
+
+    /** Solo un operador conectado puede emitir órdenes; el supervisor observa. */
+    val canCommand: Boolean get() = session?.canCommand == true
 }
 
 private data class SessionFlags(
     val forceRejectNext: Boolean,
     val simulatorLinkUp: Boolean,
-    val connectedRobotId: String?
+    val session: ConsoleSession?
 )
 
 class SupervisionViewModel(
@@ -74,9 +80,24 @@ class SupervisionViewModel(
     val missionCatalog: List<MissionConfig> = MissionCatalog.all
     val fleet: List<RobotProfile> = FleetCatalog.robots
 
-    /** Conexión de la consola: sobrevive a la recreación de la Activity y a la muerte del proceso. */
-    private val connectedRobotId: StateFlow<String?> =
-        savedStateHandle.getStateFlow(KEY_CONNECTED_ROBOT, null)
+    /** Sesión de la consola: sobrevive a la recreación de la Activity y a la muerte del proceso. */
+    private val session = combine(
+        savedStateHandle.getStateFlow<String?>(KEY_CONNECTED_ROBOT, null),
+        savedStateHandle.getStateFlow<String?>(KEY_OPERATOR_ID, null),
+        savedStateHandle.getStateFlow<String?>(KEY_ROLE, null)
+    ) { robotId, operatorId, role -> buildSession(robotId, operatorId, role) }
+
+    private fun currentSession(): ConsoleSession? = buildSession(
+        savedStateHandle[KEY_CONNECTED_ROBOT],
+        savedStateHandle[KEY_OPERATOR_ID],
+        savedStateHandle[KEY_ROLE]
+    )
+
+    private fun buildSession(robotId: String?, operatorId: String?, role: String?): ConsoleSession? {
+        val profile = FleetCatalog.find(robotId) ?: return null
+        val consoleRole = ConsoleRole.entries.firstOrNull { it.name == role } ?: return null
+        return ConsoleSession(profile, operatorId ?: return null, consoleRole)
+    }
 
     /** Para elegir la pantalla inicial antes de que el uiState emita. */
     val isInitiallyConnected: Boolean
@@ -96,8 +117,8 @@ class SupervisionViewModel(
     private val sessionFlags = combine(
         simulator.forceRejectNext,
         simulator.linkUp,
-        connectedRobotId
-    ) { force, link, connected -> SessionFlags(force, link, connected) }
+        session
+    ) { force, link, current -> SessionFlags(force, link, current) }
 
     val uiState: StateFlow<SupervisionUiState> = combine(
         robot.telemetry,
@@ -122,15 +143,15 @@ class SupervisionViewModel(
             isTelemetryStale = stale,
             lastUpdateTimestamp = telemetry.lastUpdatedTimestamp,
             secondsSinceUpdate = age / 1000L,
-            availability = if (session.connectedRobotId == null) {
-                CommandAvailability.DISCONNECTED
-            } else {
+            availability = if (session.session?.canCommand == true) {
                 CommandRules.availability(telemetry, stale, pending)
+            } else {
+                CommandAvailability.DISCONNECTED
             },
             startPreconditions = CommandRules.startPreconditions(telemetry, stale),
             forceRejectNext = session.forceRejectNext,
             simulatorLinkUp = session.simulatorLinkUp,
-            connectedRobot = FleetCatalog.find(session.connectedRobotId)
+            session = session.session
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SupervisionUiState())
 
@@ -147,7 +168,8 @@ class SupervisionViewModel(
      * emitirse (y anula la anterior, que queda registrada como no confirmada).
      */
     fun sendCommand(command: RobotCommand) {
-        if (connectedRobotId.value == null) return
+        val session = currentSession() ?: return
+        if (!session.canCommand) return
         val inFlight = commandJob?.isActive == true
         if (inFlight && command !is RobotCommand.OperationalStop) return
 
@@ -160,7 +182,8 @@ class SupervisionViewModel(
                     EventCategory.COMMAND,
                     AlertSeverity.WARNING,
                     "Orden anulada por Detención Operativa",
-                    "${superseded ?: "La orden en curso"} quedó sin confirmar al priorizar la detención."
+                    "${superseded ?: "La orden en curso"} quedó sin confirmar al priorizar la detención.",
+                    operatorId = session.operatorId
                 )
             }
             if (snapshot.isTelemetryStale) {
@@ -168,10 +191,11 @@ class SupervisionViewModel(
                     EventCategory.COMMAND,
                     AlertSeverity.WARNING,
                     "Orden emitida con datos antiguos",
-                    "${command.commandName} enviada sin telemetría fresca (último dato hace ${snapshot.secondsSinceUpdate} s)."
+                    "${command.commandName} enviada sin telemetría fresca (último dato hace ${snapshot.secondsSinceUpdate} s).",
+                    operatorId = session.operatorId
                 )
             }
-            robot.sendCommand(command)
+            robot.sendCommand(command, session.operatorId)
         }
     }
 
@@ -188,35 +212,48 @@ class SupervisionViewModel(
 
     // ---------------- Sesión de consola ----------------
 
-    fun connect(robotId: String) {
-        val profile = FleetCatalog.find(robotId) ?: return
-        if (!profile.isAvailable || connectedRobotId.value == robotId) return
+    /**
+     * Conecta la consola a un robot disponible. [operatorId] es el legajo o ID de quien la usa
+     * (sin contraseña en el MVP) y [role] define si puede emitir órdenes.
+     * Devuelve false si los datos no son válidos.
+     */
+    fun connect(robotId: String, operatorId: String, role: ConsoleRole): Boolean {
+        val profile = FleetCatalog.find(robotId) ?: return false
+        val id = normalizeOperatorId(operatorId) ?: return false
+        if (!profile.isAvailable || currentSession() != null) return false
+        savedStateHandle[KEY_OPERATOR_ID] = id
+        savedStateHandle[KEY_ROLE] = role.name
         savedStateHandle[KEY_CONNECTED_ROBOT] = robotId
         viewModelScope.launch {
             audit.logEvent(
                 EventCategory.SYSTEM,
                 AlertSeverity.INFO,
-                "Consola conectada",
-                "Supervisión iniciada sobre ${profile.displayName} (${profile.robotId})."
+                "Consola conectada (${role.displayName})",
+                "$id inició la supervisión de ${profile.displayName} (${profile.robotId}) con rol ${role.displayName.lowercase()}.",
+                operatorId = id
             )
         }
+        return true
     }
 
     fun disconnect() {
-        val robotId = connectedRobotId.value ?: return
+        val session = currentSession() ?: return
         val activeMission = robot.telemetry.value.currentMission
         commandJob?.cancel()
         savedStateHandle[KEY_CONNECTED_ROBOT] = null
+        savedStateHandle[KEY_OPERATOR_ID] = null
+        savedStateHandle[KEY_ROLE] = null
         viewModelScope.launch {
             audit.logEvent(
                 EventCategory.SYSTEM,
                 if (activeMission != null) AlertSeverity.WARNING else AlertSeverity.INFO,
                 "Consola desconectada",
                 if (activeMission != null) {
-                    "Se desconectó la consola de $robotId con la misión '${activeMission.name}' en curso: el robot continúa sin supervisión remota."
+                    "${session.operatorId} desconectó la consola de ${session.robot.robotId} con la misión '${activeMission.name}' en curso: el robot continúa sin supervisión remota."
                 } else {
-                    "Se desconectó la consola de $robotId."
-                }
+                    "${session.operatorId} desconectó la consola de ${session.robot.robotId}."
+                },
+                operatorId = session.operatorId
             )
         }
     }
@@ -252,24 +289,36 @@ class SupervisionViewModel(
 
     private fun logSimulatorAction(title: String, details: String) {
         viewModelScope.launch {
-            audit.logEvent(EventCategory.SCENARIO, AlertSeverity.INFO, title, details)
+            audit.logEvent(
+                EventCategory.SCENARIO,
+                AlertSeverity.INFO,
+                title,
+                details,
+                operatorId = currentSession()?.operatorId
+            )
         }
     }
 
     // ---------------- Historial ----------------
 
+    // Herramientas de prueba: se usan desde el panel de ingeniería, no desde la vista de Historial.
+
     fun insertSampleData() {
         viewModelScope.launch { audit.insertSampleData() }
+        logSimulatorAction("Datos de ejemplo cargados", "Se agregaron misiones y eventos de ejemplo al historial.")
     }
 
     fun clearHistory() {
+        val operatorId = currentSession()?.operatorId
         viewModelScope.launch {
             audit.clearAll()
+            // El borrado queda registrado como primer evento de la nueva auditoría.
             audit.logEvent(
                 EventCategory.SYSTEM,
-                AlertSeverity.INFO,
-                "Historial depurado",
-                "Tablas de historial y auditoría limpiadas por el operador."
+                AlertSeverity.WARNING,
+                "Historial borrado",
+                "Se borraron el historial de misiones y la auditoría desde el panel de ingeniería${operatorId?.let { " (sesión de $it)" } ?: ""}.",
+                operatorId = operatorId
             )
         }
     }
@@ -277,6 +326,13 @@ class SupervisionViewModel(
     companion object {
         private const val TICK_MS = 1_000L
         private const val KEY_CONNECTED_ROBOT = "connected_robot_id"
+        private const val KEY_OPERATOR_ID = "operator_id"
+        private const val KEY_ROLE = "console_role"
+        private val OPERATOR_ID_PATTERN = Regex("^[A-Z0-9-]{3,20}$")
+
+        /** ID de operador en mayúsculas, 3 a 20 caracteres (letras, números o guiones). */
+        fun normalizeOperatorId(raw: String): String? =
+            raw.trim().uppercase().takeIf { OPERATOR_ID_PATTERN.matches(it) }
 
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {

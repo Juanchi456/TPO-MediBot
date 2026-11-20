@@ -10,6 +10,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -34,8 +38,26 @@ fun SimulatorControlBottomSheet(
     onResetSimulation: () -> Unit,
     onPhysicalRearm: () -> Unit,
     onPhysicalBatterySwap: () -> Unit,
+    onInsertSampleData: () -> Unit,
+    onClearHistory: () -> Unit,
     onDismissRequest: () -> Unit
 ) {
+    var showClearConfirmation by rememberSaveable { mutableStateOf(false) }
+
+    if (showClearConfirmation) {
+        ConfirmActionDialog(
+            title = "¿Borrar historial y auditoría?",
+            message = "Se eliminan todas las misiones y eventos registrados en el dispositivo. El borrado queda registrado. No se puede deshacer.",
+            confirmLabel = "BORRAR TODO",
+            accentColor = CriticalRed,
+            onConfirm = {
+                showClearConfirmation = false
+                onClearHistory()
+            },
+            onDismiss = { showClearConfirmation = false }
+        )
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismissRequest,
         containerColor = DarkSurface,
@@ -218,8 +240,8 @@ fun SimulatorControlBottomSheet(
             // Scenario 2
             ScenarioButton(
                 number = 2,
-                title = "Batería Baja (14% → < 8%)",
-                desc = "Durante una misión cae a 14% (alerta WARNING) y se descarga rápido. Acción: regresar al punto seguro más cercano. Si baja de 8%, se agacha y la misión queda FALLIDA (sale con cambio de batería presencial).",
+                title = "Batería Baja (19% → retorno forzado 15%)",
+                desc = "Durante una misión cae a 19% (alerta WARNING) y se descarga rápido. Acción: regresar al punto seguro más cercano. Si nadie actúa, bajo 15% regresa solo (retorno forzado). Si está pausado y baja de 8%, se agacha (sale con cambio de batería presencial).",
                 color = WarningAmber,
                 icon = Icons.Default.BatteryAlert,
                 onClick = {
@@ -272,6 +294,38 @@ fun SimulatorControlBottomSheet(
                     onDismissRequest()
                 }
             )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(
+                text = "HERRAMIENTAS DE AUDITORÍA (SOLO PRUEBAS):",
+                style = MaterialTheme.typography.labelSmall,
+                color = DarkOnSurface,
+                letterSpacing = 1.sp
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = onInsertSampleData,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = NeonCyan),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp)
+                ) {
+                    Text("DATOS DE EJEMPLO", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                }
+                OutlinedButton(
+                    onClick = { showClearConfirmation = true },
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = CriticalRed),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp)
+                ) {
+                    Text("BORRAR HISTORIAL", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                }
+            }
 
             Spacer(modifier = Modifier.height(24.dp))
         }

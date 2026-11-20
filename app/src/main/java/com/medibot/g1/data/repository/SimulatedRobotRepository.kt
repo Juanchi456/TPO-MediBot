@@ -123,10 +123,14 @@ class SimulatedRobotRepository(
     // Comandos
     // =====================================================================
 
-    override suspend fun sendCommand(command: RobotCommand): CommandExecutionState = withContext(dispatcher) {
+    override suspend fun sendCommand(
+        command: RobotCommand,
+        operatorId: String
+    ): CommandExecutionState = withContext(dispatcher) {
         val commandId = "CMD-${shortId()}"
         val issuedAt = clock()
-        _commandState.value = CommandExecutionState.Pending(commandId, command.commandName, issuedAt)
+        val name = command.commandName
+        _commandState.value = CommandExecutionState.Pending(commandId, name, issuedAt, operatorId)
 
         // La orden solo llega si hay enlace dentro del timeout: enviada ≠ recibida.
         val delivered = withTimeoutOrNull(timing.commandTimeoutMs) {
@@ -136,21 +140,22 @@ class SimulatedRobotRepository(
 
         val result: CommandExecutionState = when {
             delivered == null -> CommandExecutionState.NoResponse(
-                commandId, command.commandName, issuedAt, timing.commandTimeoutMs
+                commandId, name, issuedAt, timing.commandTimeoutMs, operatorId
             )
             _forceRejectNext.value -> {
                 _forceRejectNext.value = false
                 CommandExecutionState.Rejected(
-                    commandId, command.commandName, issuedAt,
-                    "Rechazado por política de seguridad (forzado desde el panel de ingeniería)."
+                    commandId, name, issuedAt,
+                    "Rechazado por política de seguridad (forzado desde el panel de ingeniería).",
+                    operatorId
                 )
             }
             else -> when (val verdict = execute(command)) {
                 is Verdict.Accepted -> CommandExecutionState.Confirmed(
-                    commandId, command.commandName, issuedAt, verdict.message
+                    commandId, name, issuedAt, verdict.message, operatorId
                 )
                 is Verdict.Refused -> CommandExecutionState.Rejected(
-                    commandId, command.commandName, issuedAt, verdict.reason
+                    commandId, name, issuedAt, verdict.reason, operatorId
                 )
             }
         }
@@ -336,6 +341,10 @@ class SimulatedRobotRepository(
         )
         activeRun = run
         resumeTarget = null
+        // La cápsula se acondiciona al rango térmico de la misión (salvo que el equipo esté en falla).
+        if (coolingTargetC != FAILED_CAPSULE_TEMP_C) {
+            coolingTargetC = (mission.requiredTempRange.start + mission.requiredTempRange.endInclusive) / 2f
+        }
         robot = robot.copy(
             operationalState = OperationalState.EXECUTING_MISSION,
             currentMission = mission,
@@ -399,17 +408,47 @@ class SimulatedRobotRepository(
         publish()
         delay(timing.handoffMs)
 
+        // Con manipulación detectada la cerradura no se abre: la carga queda retenida para inspección.
+        if (robot.servicePayload.smartLockState == SmartLockState.TAMPER_ALERT) {
+            robot = robot.copy(
+                hriLedColor = LED_RED,
+                hriVoiceStatus = "Entrega bloqueada: compartimento manipulado. Requiere inspección."
+            )
+            raiseAlert(
+                AlertSeverity.CRITICAL,
+                "Entrega bloqueada por manipulación",
+                "La cápsula registró un intento de apertura no autorizada: no se libera la carga en ${run.config.destination.displayName}."
+            )
+            finishMission(MissionStatus.FAILED, "Entrega bloqueada: compartimento con alerta de manipulación; carga retenida para inspección.")
+            startReturn(
+                nearestSafePoint(robot.currentNode),
+                "Entrega bloqueada. Espero en el punto seguro para inspección."
+            )
+            publish()
+            return
+        }
+
+        val range = run.config.requiredTempRange
+        val thermalBreak = run.maxTemp > range.endInclusive + OperationalLimits.TEMP_BREAK_MARGIN_C
         robot = robot.copy(
             servicePayload = robot.servicePayload.copy(smartLockState = SmartLockState.UNLOCKED_NFC_AUTHORIZED),
             hriLedColor = LED_GREEN,
             hriVoiceStatus = "Credencial validada. Custodia transferida."
         )
         raiseAlert(
-            AlertSeverity.INFO,
+            if (thermalBreak) AlertSeverity.WARNING else AlertSeverity.INFO,
             "Entrega validada",
-            "Misión ${run.config.name} entregada en ${run.config.destination.displayName} con validación NFC."
+            "Misión ${run.config.name} entregada en ${run.config.destination.displayName} con validación NFC." +
+                if (thermalBreak) " Atención: la carga superó el rango térmico durante el traslado." else ""
         )
-        finishMission(MissionStatus.COMPLETED, "Entrega validada por NFC en destino.")
+        finishMission(
+            MissionStatus.COMPLETED,
+            if (thermalBreak) {
+                "Entregada con ruptura de cadena térmica (máx. ${run.maxTemp} °C, rango ${range.start}–${range.endInclusive} °C): requiere evaluación clínica."
+            } else {
+                "Entrega validada por NFC en destino."
+            }
+        )
         scheduleRelock()
         // Tras la entrega despeja el puesto de enfermería y espera en el punto seguro más cercano.
         startReturn(
@@ -438,7 +477,11 @@ class SimulatedRobotRepository(
      * Desplazamiento hacia un punto seguro (la base en PB o la bahía de espera en P2).
      * Si había una misión activa, queda registrada como cancelada: la carga no se entregó.
      */
-    private fun startReturn(destination: HospitalNode, voice: String) {
+    private fun startReturn(
+        destination: HospitalNode,
+        voice: String,
+        cancelNote: String = "Desviada a ${destination.displayName} por orden del operador; carga no entregada."
+    ) {
         motionJob?.cancel()
         // Regresar es la acción que resuelve la batería baja: se camina despacio y con consumo normal.
         fastBatteryDrain = false
@@ -454,10 +497,7 @@ class SimulatedRobotRepository(
         motionJob = scope.launch {
             delay(if (sameFloor) timing.returnMs else timing.returnMs * 2)
             if (activeRun != null) {
-                finishMission(
-                    MissionStatus.CANCELLED,
-                    "Desviada a ${destination.displayName} por orden del operador; carga no entregada."
-                )
+                finishMission(MissionStatus.CANCELLED, cancelNote)
             }
             returnDestination = null
             val atBase = destination == HospitalNode.DOCK_BASE
@@ -542,6 +582,8 @@ class SimulatedRobotRepository(
         )
         activeRun = null
         resumeTarget = null
+        // Sin carga, la cápsula vuelve a la temperatura de reposo.
+        if (coolingTargetC != FAILED_CAPSULE_TEMP_C) coolingTargetC = NOMINAL_CAPSULE_TEMP_C
         robot = robot.copy(currentMission = null, missionRunId = null, missionProgressPct = 0)
     }
 
@@ -599,17 +641,35 @@ class SimulatedRobotRepository(
                 "Por debajo del ${OperationalLimits.MIN_BATTERY_TO_START_PCT}% no se pueden iniciar misiones. Evalúe regresar a punto seguro."
             )
         }
+        // Retorno forzado: con menos del 15 % el robot interrumpe la ruta y regresa solo.
+        // Si está pausado o bloqueado no camina: en ese caso puede terminar agachado.
+        if (battery < OperationalLimits.FORCED_RETURN_BATTERY_PCT && robot.operationalState in AUTONOMOUS_MOTION_STATES) {
+            val destination = nearestSafePoint(robot.currentNode)
+            raiseAlert(
+                AlertSeverity.CRITICAL,
+                "Retorno forzado por batería ($battery%)",
+                "Con menos del ${OperationalLimits.FORCED_RETURN_BATTERY_PCT}% el robot interrumpió la misión y regresa solo a ${destination.displayName}."
+            )
+            startReturn(
+                destination,
+                "Batería baja: regreso automático a ${destination.displayName}.",
+                cancelNote = "Retorno forzado por batería baja ($battery%); carga no entregada."
+            )
+        }
         if (battery < OperationalLimits.CRITICAL_BATTERY_CROUCH_PCT &&
             robot.operationalState !in CommandRules.RESTING_STATES &&
             robot.operationalState != OperationalState.LOW_BATTERY_CROUCHED
         ) {
             crouchForLowBattery()
         }
-        condition(AlertCondition.COLD_CHAIN, payload.compartmentTempCelsius > OperationalLimits.COLD_CHAIN_BREAK_TEMP_C) {
+        // La cadena térmica solo importa con carga a bordo y se evalúa contra el rango de la misión.
+        val range = activeRun?.config?.requiredTempRange
+        val breakTemp = range?.let { it.endInclusive + OperationalLimits.TEMP_BREAK_MARGIN_C }
+        condition(AlertCondition.COLD_CHAIN, breakTemp != null && payload.compartmentTempCelsius > breakTemp) {
             raiseAlert(
                 AlertSeverity.CRITICAL,
-                "Cadena de frío comprometida (${payload.compartmentTempCelsius} °C)",
-                "La cápsula superó ${OperationalLimits.COLD_CHAIN_BREAK_TEMP_C} °C. Riesgo para la muestra: reconozca y cancele o desvíe a punto seguro."
+                "Cadena térmica comprometida (${payload.compartmentTempCelsius} °C)",
+                "La cápsula superó el rango de la misión (${range?.start}–${range?.endInclusive} °C). Riesgo para la carga: reconozca y cancele o desvíe a punto seguro."
             )
         }
         condition(AlertCondition.VIBRATION_CRITICAL, payload.bioSampleStabilityIndexG > OperationalLimits.VIBRATION_CRITICAL_G) {
@@ -794,7 +854,7 @@ class SimulatedRobotRepository(
                         resetState()
                         startMissionRun(MissionCatalog.bloodGas)
                     }
-                    batteryLevel = 14.0
+                    batteryLevel = 19.0
                     fastBatteryDrain = true
                     syncBattery()
                     robot = robot.copy(hriVoiceStatus = "Batería baja: se recomienda regresar a punto seguro.")
@@ -910,7 +970,7 @@ class SimulatedRobotRepository(
     private companion object {
         const val INITIAL_BATTERY = 95.0
         const val NORMAL_DRAIN_PER_TICK = 0.1
-        const val FAST_DRAIN_PER_TICK = 0.75
+        const val FAST_DRAIN_PER_TICK = 0.5
         const val NOMINAL_CAPSULE_TEMP_C = 4.0f
         const val FAILED_CAPSULE_TEMP_C = 8.4f
         const val CRUISE_SPEED = 0.6f
@@ -922,6 +982,12 @@ class SimulatedRobotRepository(
         const val LED_RED = "#FF1744"
         const val LED_GREEN = "#00E676"
         const val LED_VIOLET = "#7C4DFF"
+
+        /** Estados en los que el robot camina por su cuenta (aplica el retorno forzado). */
+        val AUTONOMOUS_MOTION_STATES = setOf(
+            OperationalState.EXECUTING_MISSION,
+            OperationalState.WAITING_ELEVATOR
+        )
 
         val ACTIVE_STATES = setOf(
             OperationalState.EXECUTING_MISSION,

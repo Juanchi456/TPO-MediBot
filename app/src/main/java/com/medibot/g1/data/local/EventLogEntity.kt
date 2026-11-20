@@ -12,5 +12,7 @@ data class EventLogEntity(
     val severity: String,
     val title: String,
     val details: String,
-    val relatedMissionId: String? = null
+    val relatedMissionId: String? = null,
+    /** Operador de la consola que originó el evento (null si lo originó el robot). */
+    val operatorId: String? = null
 )

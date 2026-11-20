@@ -24,5 +24,6 @@ data class EventRecord(
     val severity: AlertSeverity,
     val title: String,
     val details: String,
-    val relatedMissionId: String?
+    val relatedMissionId: String?,
+    val operatorId: String? = null
 )

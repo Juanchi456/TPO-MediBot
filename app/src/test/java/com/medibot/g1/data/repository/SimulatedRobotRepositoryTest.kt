@@ -52,13 +52,16 @@ class SimulatedRobotRepositoryTest {
         }
     }
 
+    private suspend fun SimulatedRobotRepository.send(command: RobotCommand) =
+        sendCommand(command, operatorId = "OP-TEST")
+
     private fun List<RobotEvent>.outcomes(): List<MissionOutcome> =
         filterIsInstance<RobotEvent.MissionFinished>().map { it.outcome }
 
     @Test
     fun `dispatched mission crosses the elevator, completes and the next one can start`() = runTest {
         withRobot { robot, events ->
-            val first = robot.sendCommand(RobotCommand.StartMission(MissionCatalog.bloodGas))
+            val first = robot.send(RobotCommand.StartMission(MissionCatalog.bloodGas))
             assertTrue(first is CommandExecutionState.Confirmed)
             val firstRunId = robot.telemetry.value.missionRunId
 
@@ -71,7 +74,7 @@ class SimulatedRobotRepositoryTest {
             assertEquals(HospitalNode.SAFE_POINT_P2, robot.telemetry.value.currentNode)
             assertEquals(SmartLockState.SEALED_LOCKED, robot.telemetry.value.servicePayload.smartLockState)
 
-            val second = robot.sendCommand(RobotCommand.StartMission(MissionCatalog.bloodGas))
+            val second = robot.send(RobotCommand.StartMission(MissionCatalog.bloodGas))
             assertTrue(second is CommandExecutionState.Confirmed)
             assertNotEquals(firstRunId, robot.telemetry.value.missionRunId)
         }
@@ -80,16 +83,16 @@ class SimulatedRobotRepositoryTest {
     @Test
     fun `pause then resume continues the route until delivery`() = runTest {
         withRobot { robot, events ->
-            robot.sendCommand(RobotCommand.StartMission(MissionCatalog.bloodGas))
+            robot.send(RobotCommand.StartMission(MissionCatalog.bloodGas))
             advanceTimeBy(step + 100)
 
-            assertTrue(robot.sendCommand(RobotCommand.PauseMission) is CommandExecutionState.Confirmed)
+            assertTrue(robot.send(RobotCommand.PauseMission) is CommandExecutionState.Confirmed)
             val progressWhilePaused = robot.telemetry.value.missionProgressPct
             advanceTimeBy(10_000)
             assertEquals(OperationalState.PAUSED, robot.telemetry.value.operationalState)
             assertEquals(progressWhilePaused, robot.telemetry.value.missionProgressPct)
 
-            assertTrue(robot.sendCommand(RobotCommand.ResumeMission) is CommandExecutionState.Confirmed)
+            assertTrue(robot.send(RobotCommand.ResumeMission) is CommandExecutionState.Confirmed)
             advanceTimeBy(3 * step + handoff + 100)
             assertEquals(MissionStatus.COMPLETED, events.outcomes().single().status)
         }
@@ -103,17 +106,17 @@ class SimulatedRobotRepositoryTest {
             advanceTimeBy(step + 100)
             assertEquals(OperationalState.INCIDENT_BLOCKED, robot.telemetry.value.operationalState)
 
-            val unacked = robot.sendCommand(RobotCommand.ResumeMission)
+            val unacked = robot.send(RobotCommand.ResumeMission)
             assertTrue(unacked is CommandExecutionState.Rejected)
 
             val alert = robot.telemetry.value.activeAlerts.first { it.severity == AlertSeverity.CRITICAL }
-            assertTrue(robot.sendCommand(RobotCommand.AcknowledgeAlert(alert.id)) is CommandExecutionState.Confirmed)
+            assertTrue(robot.send(RobotCommand.AcknowledgeAlert(alert.id)) is CommandExecutionState.Confirmed)
 
-            val obstacleStillThere = robot.sendCommand(RobotCommand.ResumeMission)
+            val obstacleStillThere = robot.send(RobotCommand.ResumeMission)
             assertTrue(obstacleStillThere is CommandExecutionState.Rejected)
 
             advanceTimeBy(SimulationTiming().obstacleClearMs)
-            assertTrue(robot.sendCommand(RobotCommand.ResumeMission) is CommandExecutionState.Confirmed)
+            assertTrue(robot.send(RobotCommand.ResumeMission) is CommandExecutionState.Confirmed)
 
             advanceTimeBy(3 * step + handoff + 100)
             assertEquals(MissionStatus.COMPLETED, events.outcomes().single().status)
@@ -123,12 +126,12 @@ class SimulatedRobotRepositoryTest {
     @Test
     fun `without link commands get no response, data freezes and events arrive on recovery`() = runTest {
         withRobot { robot, events ->
-            robot.sendCommand(RobotCommand.StartMission(MissionCatalog.bloodGas))
+            robot.send(RobotCommand.StartMission(MissionCatalog.bloodGas))
             robot.injectScenario(SimulationScenario.DISCONNECTION)
             runCurrent()
             val frozenAt = robot.telemetry.value.lastUpdatedTimestamp
 
-            val result = robot.sendCommand(RobotCommand.PauseMission)
+            val result = robot.send(RobotCommand.PauseMission)
             assertTrue(result is CommandExecutionState.NoResponse)
             assertEquals(frozenAt, robot.telemetry.value.lastUpdatedTimestamp)
 
@@ -146,25 +149,57 @@ class SimulatedRobotRepositoryTest {
     @Test
     fun `cancel while paused is recorded as cancelled`() = runTest {
         withRobot { robot, events ->
-            robot.sendCommand(RobotCommand.StartMission(MissionCatalog.plasma))
+            robot.send(RobotCommand.StartMission(MissionCatalog.plasma))
             advanceTimeBy(step + 100)
-            robot.sendCommand(RobotCommand.PauseMission)
+            robot.send(RobotCommand.PauseMission)
 
-            assertTrue(robot.sendCommand(RobotCommand.CancelMission) is CommandExecutionState.Confirmed)
+            assertTrue(robot.send(RobotCommand.CancelMission) is CommandExecutionState.Confirmed)
             assertEquals(MissionStatus.CANCELLED, events.outcomes().single().status)
         }
     }
 
     @Test
-    fun `low battery offers return, and ignoring it ends crouched with a failed mission`() = runTest {
+    fun `ignoring low battery triggers the forced return below 15 percent`() = runTest {
         withRobot { robot, events ->
             robot.injectScenario(SimulationScenario.LOW_BATTERY)
             runCurrent()
             assertTrue(robot.telemetry.value.activeAlerts.any { it.severity == AlertSeverity.WARNING })
 
             advanceTimeBy(10_000)
+            assertEquals(OperationalState.RETURNING_TO_SAFE_POINT, robot.telemetry.value.operationalState)
+            assertTrue(robot.telemetry.value.activeAlerts.any { it.title.startsWith("Retorno forzado") })
+
+            advanceTimeBy(SimulationTiming().returnMs * 2 + 100)
+            val outcome = events.outcomes().single()
+            assertEquals(MissionStatus.CANCELLED, outcome.status)
+            assertTrue(outcome.notes.startsWith("Retorno forzado"))
+            assertTrue(robot.telemetry.value.operationalState in setOf(OperationalState.AT_SAFE_POINT, OperationalState.IDLE_AT_DOCK))
+        }
+    }
+
+    @Test
+    fun `a paused robot that keeps draining ends crouched with a failed mission`() = runTest {
+        withRobot { robot, events ->
+            robot.injectScenario(SimulationScenario.LOW_BATTERY)
+            runCurrent()
+            assertTrue(robot.send(RobotCommand.PauseMission) is CommandExecutionState.Confirmed)
+
+            advanceTimeBy(25_000)
             assertEquals(OperationalState.LOW_BATTERY_CROUCHED, robot.telemetry.value.operationalState)
             assertEquals(MissionStatus.FAILED, events.outcomes().single().status)
+        }
+    }
+
+    @Test
+    fun `pharmacy mission conditions the capsule to its own range without cold chain alerts`() = runTest {
+        withRobot { robot, events ->
+            assertTrue(robot.send(RobotCommand.StartMission(MissionCatalog.pharmacy)) is CommandExecutionState.Confirmed)
+            advanceTimeBy(4 * step + handoff + 100)
+
+            val outcome = events.outcomes().single()
+            assertEquals(MissionStatus.COMPLETED, outcome.status)
+            assertTrue(outcome.maxTempCelsius in 15f..25f)
+            assertTrue(robot.telemetry.value.activeAlerts.none { it.title.startsWith("Cadena") })
         }
     }
 
@@ -174,7 +209,7 @@ class SimulatedRobotRepositoryTest {
             robot.injectScenario(SimulationScenario.LOW_BATTERY)
             runCurrent()
 
-            assertTrue(robot.sendCommand(RobotCommand.ReturnToSafePoint) is CommandExecutionState.Confirmed)
+            assertTrue(robot.send(RobotCommand.ReturnToSafePoint) is CommandExecutionState.Confirmed)
             advanceTimeBy(SimulationTiming().returnMs + 100)
 
             assertEquals(OperationalState.IDLE_AT_DOCK, robot.telemetry.value.operationalState)
@@ -186,10 +221,10 @@ class SimulatedRobotRepositoryTest {
     @Test
     fun `cancel sends the robot back to the base`() = runTest {
         withRobot { robot, events ->
-            robot.sendCommand(RobotCommand.StartMission(MissionCatalog.bloodGas))
+            robot.send(RobotCommand.StartMission(MissionCatalog.bloodGas))
             advanceTimeBy(step + 100)
 
-            assertTrue(robot.sendCommand(RobotCommand.CancelMission) is CommandExecutionState.Confirmed)
+            assertTrue(robot.send(RobotCommand.CancelMission) is CommandExecutionState.Confirmed)
             assertEquals(MissionStatus.CANCELLED, events.outcomes().single().status)
             assertEquals(OperationalState.RETURNING_TO_SAFE_POINT, robot.telemetry.value.operationalState)
 
@@ -202,11 +237,11 @@ class SimulatedRobotRepositoryTest {
     @Test
     fun `return from the second floor goes to the nearest safe point`() = runTest {
         withRobot { robot, events ->
-            robot.sendCommand(RobotCommand.StartMission(MissionCatalog.bloodGas))
+            robot.send(RobotCommand.StartMission(MissionCatalog.bloodGas))
             advanceTimeBy(3 * step + 100)
             assertEquals(HospitalNode.SAFE_POINT_P2, robot.telemetry.value.currentNode)
 
-            assertTrue(robot.sendCommand(RobotCommand.ReturnToSafePoint) is CommandExecutionState.Confirmed)
+            assertTrue(robot.send(RobotCommand.ReturnToSafePoint) is CommandExecutionState.Confirmed)
             advanceTimeBy(SimulationTiming().returnMs + 100)
 
             assertEquals(OperationalState.AT_SAFE_POINT, robot.telemetry.value.operationalState)
@@ -217,19 +252,32 @@ class SimulatedRobotRepositoryTest {
     @Test
     fun `after a stop only the physical rearm lets the mission resume`() = runTest {
         withRobot { robot, events ->
-            robot.sendCommand(RobotCommand.StartMission(MissionCatalog.bloodGas))
+            robot.send(RobotCommand.StartMission(MissionCatalog.bloodGas))
             advanceTimeBy(step + 100)
-            robot.sendCommand(RobotCommand.OperationalStop)
+            robot.send(RobotCommand.OperationalStop)
             assertEquals(OperationalState.EMERGENCY_STOPPED, robot.telemetry.value.operationalState)
-            assertTrue(robot.sendCommand(RobotCommand.ResumeMission) is CommandExecutionState.Rejected)
+            assertTrue(robot.send(RobotCommand.ResumeMission) is CommandExecutionState.Rejected)
 
             robot.physicalRearm()
             runCurrent()
             assertEquals(OperationalState.PAUSED, robot.telemetry.value.operationalState)
 
-            assertTrue(robot.sendCommand(RobotCommand.ResumeMission) is CommandExecutionState.Confirmed)
+            assertTrue(robot.send(RobotCommand.ResumeMission) is CommandExecutionState.Confirmed)
             advanceTimeBy(3 * step + handoff + 100)
             assertEquals(MissionStatus.COMPLETED, events.outcomes().single().status)
+        }
+    }
+
+    @Test
+    fun `a tampered capsule is not released at destination`() = runTest {
+        withRobot { robot, events ->
+            robot.injectScenario(SimulationScenario.COLD_CHAIN_FAILURE)
+            runCurrent()
+            advanceTimeBy(4 * step + handoff + 100)
+
+            val outcome = events.outcomes().single()
+            assertEquals(MissionStatus.FAILED, outcome.status)
+            assertEquals(SmartLockState.TAMPER_ALERT, robot.telemetry.value.servicePayload.smartLockState)
         }
     }
 
@@ -238,14 +286,14 @@ class SimulatedRobotRepositoryTest {
         withRobot { robot, _ ->
             robot.injectScenario(SimulationScenario.LOW_BATTERY)
             runCurrent()
-            advanceTimeBy(10_000)
+            robot.send(RobotCommand.PauseMission)
+            advanceTimeBy(25_000)
             assertEquals(OperationalState.LOW_BATTERY_CROUCHED, robot.telemetry.value.operationalState)
 
-            // Se agachó en la bahía de espera del Piso 2 y sin misión: queda en reposo ahí.
-            assertEquals(HospitalNode.SAFE_POINT_P2, robot.telemetry.value.currentNode)
+            // Se agachó en el laboratorio (no es punto seguro): tras el cambio queda en pausa.
             robot.physicalBatterySwap()
             runCurrent()
-            assertEquals(OperationalState.AT_SAFE_POINT, robot.telemetry.value.operationalState)
+            assertEquals(OperationalState.PAUSED, robot.telemetry.value.operationalState)
             assertEquals(100, robot.telemetry.value.batteryPercentage)
         }
     }
@@ -253,7 +301,7 @@ class SimulatedRobotRepositoryTest {
     @Test
     fun `link is reported as degraded inside the elevator`() = runTest {
         withRobot { robot, _ ->
-            robot.sendCommand(RobotCommand.StartMission(MissionCatalog.bloodGas))
+            robot.send(RobotCommand.StartMission(MissionCatalog.bloodGas))
             advanceTimeBy(2 * step + 100)
             assertEquals(HospitalNode.ELEVATOR_BANK, robot.telemetry.value.currentNode)
             assertEquals(ConnectionStatus.DEGRADED, robot.telemetry.value.connectionStatus)
@@ -268,10 +316,10 @@ class SimulatedRobotRepositoryTest {
         withRobot { robot, _ ->
             robot.setForceRejectNext(true)
             assertTrue(
-                robot.sendCommand(RobotCommand.StartMission(MissionCatalog.bloodGas)) is CommandExecutionState.Rejected
+                robot.send(RobotCommand.StartMission(MissionCatalog.bloodGas)) is CommandExecutionState.Rejected
             )
             assertTrue(
-                robot.sendCommand(RobotCommand.StartMission(MissionCatalog.bloodGas)) is CommandExecutionState.Confirmed
+                robot.send(RobotCommand.StartMission(MissionCatalog.bloodGas)) is CommandExecutionState.Confirmed
             )
         }
     }

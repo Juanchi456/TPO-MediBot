@@ -13,9 +13,13 @@ import java.util.Locale
  */
 object OperationalLimits {
     const val MIN_BATTERY_TO_START_PCT = 20
+    const val FORCED_RETURN_BATTERY_PCT = 15
     const val CRITICAL_BATTERY_CROUCH_PCT = 8
     const val MAX_START_TEMP_C = 6.0f
     const val COLD_CHAIN_BREAK_TEMP_C = 6.5f
+
+    /** Margen sobre el máximo del rango de la misión a partir del cual se rompe la cadena térmica. */
+    const val TEMP_BREAK_MARGIN_C = 0.5f
     const val VIBRATION_WARNING_G = 0.30f
     const val VIBRATION_CRITICAL_G = 0.60f
     const val OBSTACLE_MIN_CLEARANCE_M = 0.40f
@@ -113,7 +117,7 @@ object CommandRules {
                 passed = lock == SmartLockState.SEALED_LOCKED
             ),
             Precondition(
-                label = "Temperatura cápsula ≤ ${OperationalLimits.MAX_START_TEMP_C} °C",
+                label = "Cápsula estable en reposo (≤ ${OperationalLimits.MAX_START_TEMP_C} °C)",
                 currentValue = String.format(Locale.US, "%.1f °C", temp),
                 passed = temp <= OperationalLimits.MAX_START_TEMP_C
             ),

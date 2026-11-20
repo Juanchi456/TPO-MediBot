@@ -115,9 +115,12 @@ fun DashboardScreen(
                     // Operative Stop Permanent Button
                     Button(
                         onClick = { showEmergencyConfirmDialog = true },
+                        enabled = uiState.availability.operationalStop,
                         colors = ButtonDefaults.buttonColors(
                             containerColor = CriticalRed,
-                            contentColor = Color.White
+                            contentColor = Color.White,
+                            disabledContainerColor = DarkSurfaceVariant,
+                            disabledContentColor = StaleGray
                         ),
                         shape = RoundedCornerShape(8.dp),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
@@ -138,6 +141,15 @@ fun DashboardScreen(
                     color = if (isStale) WarningAmber else DarkOnSurface,
                     fontWeight = if (isStale) FontWeight.Bold else FontWeight.Normal
                 )
+
+                uiState.session?.let { session ->
+                    Text(
+                        text = "Sesión: ${session.operatorId} · ${session.role.displayName} · ${session.robot.displayName}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (session.canCommand) NeonCyan else WarningAmber,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(6.dp))
 
@@ -210,11 +222,22 @@ fun DashboardScreen(
         Spacer(modifier = Modifier.height(8.dp))
 
         // 3 Specific Medical Variables Grid
+        // El rango térmico depende de la misión; sin misión la cápsula está en reposo (2–6 °C).
         val tempVal = telemetry.servicePayload.compartmentTempCelsius
+        val missionRange = telemetry.currentMission?.requiredTempRange
+        val tempRange = missionRange ?: 2.0f..OperationalLimits.MAX_START_TEMP_C
+        val rangeText = "${tempRange.start.toInt()}–${tempRange.endInclusive.toInt()} °C"
         val tempState = when {
-            tempVal > OperationalLimits.COLD_CHAIN_BREAK_TEMP_C -> TelemetryCardState.ERROR
-            tempVal > OperationalLimits.MAX_START_TEMP_C -> TelemetryCardState.WARNING
+            tempVal > tempRange.endInclusive + OperationalLimits.TEMP_BREAK_MARGIN_C -> TelemetryCardState.ERROR
+            tempVal !in tempRange -> TelemetryCardState.WARNING
             else -> TelemetryCardState.NORMAL
+        }
+        val tempSubtitle = when {
+            tempState == TelemetryCardState.ERROR -> "¡FUERA DE RANGO! ($rangeText)"
+            tempState == TelemetryCardState.WARNING && missionRange != null -> "Acondicionando a $rangeText"
+            tempState == TelemetryCardState.WARNING -> "Fuera de reposo ($rangeText)"
+            missionRange != null -> "Rango de la misión $rangeText"
+            else -> "Reposo $rangeText"
         }
 
         val stabVal = telemetry.servicePayload.bioSampleStabilityIndexG
@@ -238,7 +261,7 @@ fun DashboardScreen(
                 title = "Temperatura Cápsula",
                 value = String.format("%.1f", tempVal),
                 unit = "°C",
-                subtitle = if (tempVal > OperationalLimits.COLD_CHAIN_BREAK_TEMP_C) "¡CADENA ROTA!" else "Rango seguro 2–6 °C",
+                subtitle = tempSubtitle,
                 icon = Icons.Default.Thermostat,
                 cardState = tempState,
                 isStale = isStale,
@@ -388,7 +411,9 @@ fun DashboardScreen(
             availability = uiState.availability,
             commandState = uiState.commandState,
             onSendCommand = onSendCommand,
-            onDismissFeedback = onDismissCommandFeedback
+            onDismissFeedback = onDismissCommandFeedback,
+            readOnlyReason = if (uiState.canCommand) null else
+                "MODO SUPERVISOR: solo lectura. Las órdenes (incluida la detención) las emite el operador conectado."
         )
 
         // Espacio para que el botón flotante del panel de ingeniería no tape controles

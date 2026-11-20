@@ -98,12 +98,13 @@ private fun MediBotApp(viewModel: SupervisionViewModel) {
             composable(Screen.Robot.route) {
                 RobotSelectionScreen(
                     fleet = viewModel.fleet,
-                    connectedRobot = uiState.connectedRobot,
+                    session = uiState.session,
                     telemetry = uiState.telemetry,
                     linkStatus = uiState.linkStatus,
-                    onConnect = { robotId ->
-                        viewModel.connect(robotId)
-                        navController.navigateToTab(Screen.Dashboard)
+                    onConnect = { robotId, operatorId, role ->
+                        val connected = viewModel.connect(robotId, operatorId, role)
+                        if (connected) navController.navigateToTab(Screen.Dashboard)
+                        connected
                     },
                     onDisconnect = viewModel::disconnect,
                     onOpenConsole = { navController.navigateToTab(Screen.Dashboard) }
@@ -128,6 +129,8 @@ private fun MediBotApp(viewModel: SupervisionViewModel) {
                     catalog = viewModel.missionCatalog,
                     preconditions = uiState.startPreconditions,
                     canStart = uiState.availability.start,
+                    readOnlyReason = if (uiState.canCommand) null else
+                        "Modo supervisor: solo el operador puede despachar misiones.",
                     onStartMission = { mission ->
                         viewModel.startMission(mission)
                         navController.navigateToTab(Screen.Dashboard)
@@ -137,9 +140,7 @@ private fun MediBotApp(viewModel: SupervisionViewModel) {
             composable(Screen.History.route) {
                 HistoryScreen(
                     missionsHistory = missionsHistory,
-                    eventLogs = eventLogs,
-                    onInsertSeedData = viewModel::insertSampleData,
-                    onClearHistory = viewModel::clearHistory
+                    eventLogs = eventLogs
                 )
             }
         }
@@ -155,6 +156,8 @@ private fun MediBotApp(viewModel: SupervisionViewModel) {
                 onResetSimulation = viewModel::resetSimulation,
                 onPhysicalRearm = viewModel::physicalRearm,
                 onPhysicalBatterySwap = viewModel::physicalBatterySwap,
+                onInsertSampleData = viewModel::insertSampleData,
+                onClearHistory = viewModel::clearHistory,
                 onDismissRequest = { showSimulatorBottomSheet = false }
             )
         }
