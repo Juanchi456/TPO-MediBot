@@ -27,6 +27,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.medibot.g1.ui.components.ConsoleDisconnectedNotice
 import com.medibot.g1.ui.components.SimulatorControlBottomSheet
 import com.medibot.g1.ui.screens.DashboardScreen
 import com.medibot.g1.ui.screens.HistoryScreen
@@ -90,26 +91,40 @@ private fun MediBotApp(viewModel: SupervisionViewModel) {
     ) { innerPadding ->
         NavHost(
             navController = navController,
-            startDestination = Screen.Dashboard.route,
+            // Sin conexión previa se empieza por la selección del robot (flujo de la consigna).
+            startDestination = if (viewModel.isInitiallyConnected) Screen.Dashboard.route else Screen.Robot.route,
             modifier = Modifier.padding(innerPadding)
         ) {
             composable(Screen.Robot.route) {
                 RobotSelectionScreen(
+                    fleet = viewModel.fleet,
+                    connectedRobot = uiState.connectedRobot,
                     telemetry = uiState.telemetry,
                     linkStatus = uiState.linkStatus,
-                    onNavigateToDashboard = { navController.navigateToTab(Screen.Dashboard) }
+                    onConnect = { robotId ->
+                        viewModel.connect(robotId)
+                        navController.navigateToTab(Screen.Dashboard)
+                    },
+                    onDisconnect = viewModel::disconnect,
+                    onOpenConsole = { navController.navigateToTab(Screen.Dashboard) }
                 )
             }
             composable(Screen.Dashboard.route) {
-                DashboardScreen(
-                    uiState = uiState,
-                    onSendCommand = viewModel::sendCommand,
-                    onAcknowledgeAlert = viewModel::acknowledgeAlert,
-                    onDismissCommandFeedback = viewModel::dismissCommandFeedback
-                )
+                if (!uiState.isConsoleConnected) {
+                    ConsoleDisconnectedNotice(onGoToRobotSelection = { navController.navigateToTab(Screen.Robot) })
+                } else {
+                    DashboardScreen(
+                        uiState = uiState,
+                        onSendCommand = viewModel::sendCommand,
+                        onAcknowledgeAlert = viewModel::acknowledgeAlert,
+                        onDismissCommandFeedback = viewModel::dismissCommandFeedback
+                    )
+                }
             }
             composable(Screen.Missions.route) {
-                MissionsScreen(
+                if (!uiState.isConsoleConnected) {
+                    ConsoleDisconnectedNotice(onGoToRobotSelection = { navController.navigateToTab(Screen.Robot) })
+                } else MissionsScreen(
                     catalog = viewModel.missionCatalog,
                     preconditions = uiState.startPreconditions,
                     canStart = uiState.availability.start,
@@ -132,11 +147,14 @@ private fun MediBotApp(viewModel: SupervisionViewModel) {
         if (showSimulatorBottomSheet) {
             SimulatorControlBottomSheet(
                 linkUp = uiState.simulatorLinkUp,
+                operationalState = uiState.telemetry.operationalState,
                 forceRejectNext = uiState.forceRejectNext,
                 onInjectScenario = viewModel::injectScenario,
                 onToggleForceReject = viewModel::setForceRejectNext,
                 onRestoreConnection = viewModel::restoreConnection,
                 onResetSimulation = viewModel::resetSimulation,
+                onPhysicalRearm = viewModel::physicalRearm,
+                onPhysicalBatterySwap = viewModel::physicalBatterySwap,
                 onDismissRequest = { showSimulatorBottomSheet = false }
             )
         }

@@ -9,7 +9,8 @@ enum class OperationalState(val displayName: String) {
     AWAITING_NFC_HANDOFF("Esperando Validación NFC"),
     PAUSED("Pausado"),
     RETURNING_TO_SAFE_POINT("Retornando a Punto Seguro"),
-    EMERGENCY_STOPPED("Parada de Emergencia"),
+    AT_SAFE_POINT("En Punto Seguro"),
+    EMERGENCY_STOPPED("Detención Operativa"),
     INCIDENT_BLOCKED("Bloqueado por Incidente"),
     LOW_BATTERY_CROUCHED("Batería Baja - Agachado")
 }

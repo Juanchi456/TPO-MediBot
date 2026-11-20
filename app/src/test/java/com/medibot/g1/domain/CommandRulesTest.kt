@@ -24,6 +24,19 @@ class CommandRulesTest {
     }
 
     @Test
+    fun `missions can also be dispatched from a safe point`() {
+        val atSafePoint = idle.copy(operationalState = OperationalState.AT_SAFE_POINT)
+        assertTrue(CommandRules.availability(atSafePoint, isStale = false, isCommandPending = false).start)
+        assertFalse(CommandRules.availability(atSafePoint, isStale = false, isCommandPending = false).returnToSafePoint)
+    }
+
+    @Test
+    fun `a disconnected console cannot issue any command, not even the stop`() {
+        assertFalse(CommandAvailability.DISCONNECTED.operationalStop)
+        assertFalse(CommandAvailability.DISCONNECTED.start)
+    }
+
+    @Test
     fun `a pending command blocks everything except the operational stop`() {
         val executing = idle.copy(
             operationalState = OperationalState.EXECUTING_MISSION,

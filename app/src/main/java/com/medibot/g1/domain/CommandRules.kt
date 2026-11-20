@@ -51,6 +51,9 @@ data class CommandAvailability(
             returnToSafePoint = false,
             acknowledge = false
         )
+
+        /** Sin consola conectada no se puede emitir ninguna orden (ni siquiera la detención). */
+        val DISCONNECTED = NONE.copy(operationalStop = false)
     }
 }
 
@@ -72,8 +75,15 @@ object CommandRules {
         OperationalState.INCIDENT_BLOCKED
     )
 
+    /** Estados de reposo desde los que se puede despachar una misión. */
+    val RESTING_STATES = setOf(
+        OperationalState.IDLE_AT_DOCK,
+        OperationalState.AT_SAFE_POINT
+    )
+
     private val NO_RETURN_STATES = setOf(
         OperationalState.IDLE_AT_DOCK,
+        OperationalState.AT_SAFE_POINT,
         OperationalState.LOW_BATTERY_CROUCHED,
         OperationalState.RETURNING_TO_SAFE_POINT
     )
@@ -88,9 +98,9 @@ object CommandRules {
         val linkOk = !isStale && telemetry.connectionStatus == ConnectionStatus.ONLINE
         return listOf(
             Precondition(
-                label = "Robot en reposo en base",
+                label = "Robot en reposo (base o punto seguro)",
                 currentValue = telemetry.operationalState.displayName,
-                passed = telemetry.operationalState == OperationalState.IDLE_AT_DOCK
+                passed = telemetry.operationalState in RESTING_STATES
             ),
             Precondition(
                 label = "Batería ≥ ${OperationalLimits.MIN_BATTERY_TO_START_PCT}%",

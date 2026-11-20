@@ -18,6 +18,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.medibot.g1.data.model.OperationalState
 import com.medibot.g1.data.repository.SimulationScenario
 import com.medibot.g1.ui.theme.*
 
@@ -25,11 +26,14 @@ import com.medibot.g1.ui.theme.*
 @Composable
 fun SimulatorControlBottomSheet(
     linkUp: Boolean,
+    operationalState: OperationalState,
     forceRejectNext: Boolean,
     onInjectScenario: (SimulationScenario) -> Unit,
     onToggleForceReject: (Boolean) -> Unit,
     onRestoreConnection: () -> Unit,
     onResetSimulation: () -> Unit,
+    onPhysicalRearm: () -> Unit,
+    onPhysicalBatterySwap: () -> Unit,
     onDismissRequest: () -> Unit
 ) {
     ModalBottomSheet(
@@ -140,6 +144,30 @@ fun SimulatorControlBottomSheet(
                 Spacer(modifier = Modifier.height(14.dp))
             }
 
+            // Acciones presenciales: la app no puede rearmar ni recargar el robot.
+            if (operationalState == OperationalState.EMERGENCY_STOPPED) {
+                PhysicalActionButton(
+                    label = "REARME PRESENCIAL (TÉCNICO EN EL LUGAR)",
+                    icon = Icons.Default.Build,
+                    onClick = {
+                        onPhysicalRearm()
+                        onDismissRequest()
+                    }
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+            if (operationalState == OperationalState.LOW_BATTERY_CROUCHED) {
+                PhysicalActionButton(
+                    label = "CAMBIO DE BATERÍA PRESENCIAL",
+                    icon = Icons.Default.BatteryChargingFull,
+                    onClick = {
+                        onPhysicalBatterySwap()
+                        onDismissRequest()
+                    }
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
             OutlinedButton(
                 onClick = {
                     onResetSimulation()
@@ -156,7 +184,7 @@ fun SimulatorControlBottomSheet(
                 Text("REINICIAR SIMULACIÓN (ROBOT EN BASE)", fontWeight = FontWeight.Bold)
             }
             Text(
-                text = "Vuelve al estado inicial: sirve para salir de estados sin recuperación definida (agachado, detención, tamper).",
+                text = "Vuelve al estado inicial (robot en base). Útil para salir del tamper o repetir un escenario.",
                 fontSize = 11.sp,
                 color = DarkOnSurface
             )
@@ -191,7 +219,7 @@ fun SimulatorControlBottomSheet(
             ScenarioButton(
                 number = 2,
                 title = "Batería Baja (14% → < 8%)",
-                desc = "Durante una misión cae a 14% (alerta WARNING) y se descarga rápido. Acción: regresar a punto seguro. Si baja de 8%, se agacha (CROUCHED_SAFE_LOCK) y la misión queda FALLIDA.",
+                desc = "Durante una misión cae a 14% (alerta WARNING) y se descarga rápido. Acción: regresar al punto seguro más cercano. Si baja de 8%, se agacha y la misión queda FALLIDA (sale con cambio de batería presencial).",
                 color = WarningAmber,
                 icon = Icons.Default.BatteryAlert,
                 onClick = {
@@ -236,7 +264,7 @@ fun SimulatorControlBottomSheet(
             ScenarioButton(
                 number = 5,
                 title = "Cadena de Frío / Tamper (8.4°C)",
-                desc = "Durante una misión la cápsula sube a 8.4 °C y se activa TAMPER_ALERT. Exige ACK y cancelar o desviar. Se sale con Reiniciar simulación.",
+                desc = "Durante una misión la cápsula sube a 8.4 °C y se activa TAMPER_ALERT. Exige ACK y cancelar (vuelve a la base) o desviar a punto seguro. Se normaliza con Reiniciar simulación.",
                 color = ElectricViolet,
                 icon = Icons.Default.Thermostat,
                 onClick = {
@@ -247,6 +275,22 @@ fun SimulatorControlBottomSheet(
 
             Spacer(modifier = Modifier.height(24.dp))
         }
+    }
+}
+
+@Composable
+private fun PhysicalActionButton(label: String, icon: ImageVector, onClick: () -> Unit) {
+    Button(
+        onClick = onClick,
+        colors = ButtonDefaults.buttonColors(containerColor = WarningAmber, contentColor = DarkBackground),
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+    ) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(label, fontWeight = FontWeight.Bold)
     }
 }
 

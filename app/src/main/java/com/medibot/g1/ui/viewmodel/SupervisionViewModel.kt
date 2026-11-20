@@ -1,6 +1,8 @@
 package com.medibot.g1.ui.viewmodel
 
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
@@ -11,10 +13,12 @@ import com.medibot.g1.data.model.CommandExecutionState
 import com.medibot.g1.data.model.ConnectionStatus
 import com.medibot.g1.data.model.EventCategory
 import com.medibot.g1.data.model.EventRecord
+import com.medibot.g1.data.model.FleetCatalog
 import com.medibot.g1.data.model.MissionCatalog
 import com.medibot.g1.data.model.MissionConfig
 import com.medibot.g1.data.model.MissionRecord
 import com.medibot.g1.data.model.RobotCommand
+import com.medibot.g1.data.model.RobotProfile
 import com.medibot.g1.data.model.TelemetryState
 import com.medibot.g1.data.repository.AuditRepository
 import com.medibot.g1.data.repository.RobotRepository
@@ -46,17 +50,37 @@ data class SupervisionUiState(
     val availability: CommandAvailability = CommandAvailability.NONE,
     val startPreconditions: List<Precondition> = emptyList(),
     val forceRejectNext: Boolean = false,
-    val simulatorLinkUp: Boolean = true
+    val simulatorLinkUp: Boolean = true,
+    /** Robot al que está conectada la consola; null = consola desconectada. */
+    val connectedRobot: RobotProfile? = null
+) {
+    val isConsoleConnected: Boolean get() = connectedRobot != null
+}
+
+private data class SessionFlags(
+    val forceRejectNext: Boolean,
+    val simulatorLinkUp: Boolean,
+    val connectedRobotId: String?
 )
 
 class SupervisionViewModel(
     private val robot: RobotRepository,
     private val simulator: SimulatorControls,
     private val audit: AuditRepository,
+    private val savedStateHandle: SavedStateHandle = SavedStateHandle(),
     private val clock: () -> Long = System::currentTimeMillis
 ) : ViewModel() {
 
     val missionCatalog: List<MissionConfig> = MissionCatalog.all
+    val fleet: List<RobotProfile> = FleetCatalog.robots
+
+    /** Conexión de la consola: sobrevive a la recreación de la Activity y a la muerte del proceso. */
+    private val connectedRobotId: StateFlow<String?> =
+        savedStateHandle.getStateFlow(KEY_CONNECTED_ROBOT, null)
+
+    /** Para elegir la pantalla inicial antes de que el uiState emita. */
+    val isInitiallyConnected: Boolean
+        get() = savedStateHandle.get<String>(KEY_CONNECTED_ROBOT) != null
 
     /** Reloj de la UI: recalcula la antigüedad del dato aunque no llegue telemetría. */
     private val ticker = flow {
@@ -69,17 +93,19 @@ class SupervisionViewModel(
     /** Id de la última orden cuyo resultado el operador cerró (el resultado sigue en auditoría). */
     private val dismissedCommandId = MutableStateFlow<String?>(null)
 
-    private val simulatorFlags = combine(simulator.forceRejectNext, simulator.linkUp) { force, link ->
-        force to link
-    }
+    private val sessionFlags = combine(
+        simulator.forceRejectNext,
+        simulator.linkUp,
+        connectedRobotId
+    ) { force, link, connected -> SessionFlags(force, link, connected) }
 
     val uiState: StateFlow<SupervisionUiState> = combine(
         robot.telemetry,
         robot.commandState,
         dismissedCommandId,
         ticker,
-        simulatorFlags
-    ) { telemetry, command, dismissedId, now, (forceReject, linkUp) ->
+        sessionFlags
+    ) { telemetry, command, dismissedId, now, session ->
         val age = (now - telemetry.lastUpdatedTimestamp).coerceAtLeast(0L)
         val stale = age > OperationalLimits.STALE_THRESHOLD_MS
         val pending = command is CommandExecutionState.Pending
@@ -96,10 +122,15 @@ class SupervisionViewModel(
             isTelemetryStale = stale,
             lastUpdateTimestamp = telemetry.lastUpdatedTimestamp,
             secondsSinceUpdate = age / 1000L,
-            availability = CommandRules.availability(telemetry, stale, pending),
+            availability = if (session.connectedRobotId == null) {
+                CommandAvailability.DISCONNECTED
+            } else {
+                CommandRules.availability(telemetry, stale, pending)
+            },
             startPreconditions = CommandRules.startPreconditions(telemetry, stale),
-            forceRejectNext = forceReject,
-            simulatorLinkUp = linkUp
+            forceRejectNext = session.forceRejectNext,
+            simulatorLinkUp = session.simulatorLinkUp,
+            connectedRobot = FleetCatalog.find(session.connectedRobotId)
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SupervisionUiState())
 
@@ -116,6 +147,7 @@ class SupervisionViewModel(
      * emitirse (y anula la anterior, que queda registrada como no confirmada).
      */
     fun sendCommand(command: RobotCommand) {
+        if (connectedRobotId.value == null) return
         val inFlight = commandJob?.isActive == true
         if (inFlight && command !is RobotCommand.OperationalStop) return
 
@@ -154,6 +186,41 @@ class SupervisionViewModel(
         }
     }
 
+    // ---------------- Sesión de consola ----------------
+
+    fun connect(robotId: String) {
+        val profile = FleetCatalog.find(robotId) ?: return
+        if (!profile.isAvailable || connectedRobotId.value == robotId) return
+        savedStateHandle[KEY_CONNECTED_ROBOT] = robotId
+        viewModelScope.launch {
+            audit.logEvent(
+                EventCategory.SYSTEM,
+                AlertSeverity.INFO,
+                "Consola conectada",
+                "Supervisión iniciada sobre ${profile.displayName} (${profile.robotId})."
+            )
+        }
+    }
+
+    fun disconnect() {
+        val robotId = connectedRobotId.value ?: return
+        val activeMission = robot.telemetry.value.currentMission
+        commandJob?.cancel()
+        savedStateHandle[KEY_CONNECTED_ROBOT] = null
+        viewModelScope.launch {
+            audit.logEvent(
+                EventCategory.SYSTEM,
+                if (activeMission != null) AlertSeverity.WARNING else AlertSeverity.INFO,
+                "Consola desconectada",
+                if (activeMission != null) {
+                    "Se desconectó la consola de $robotId con la misión '${activeMission.name}' en curso: el robot continúa sin supervisión remota."
+                } else {
+                    "Se desconectó la consola de $robotId."
+                }
+            )
+        }
+    }
+
     // ---------------- Panel de ingeniería (simulador) ----------------
 
     fun setForceRejectNext(value: Boolean) = simulator.setForceRejectNext(value)
@@ -166,6 +233,16 @@ class SupervisionViewModel(
     fun injectScenario(scenario: SimulationScenario) {
         simulator.injectScenario(scenario)
         logSimulatorAction("Inyección de prueba: ${scenario.title}", "Disparado manualmente desde el panel de ingeniería.")
+    }
+
+    fun physicalRearm() {
+        simulator.physicalRearm()
+        logSimulatorAction("Rearme presencial", "Un técnico rearmó el robot en el lugar (simulado).")
+    }
+
+    fun physicalBatterySwap() {
+        simulator.physicalBatterySwap()
+        logSimulatorAction("Cambio de batería presencial", "Un técnico reemplazó la batería del robot (simulado).")
     }
 
     fun resetSimulation() {
@@ -199,6 +276,7 @@ class SupervisionViewModel(
 
     companion object {
         private const val TICK_MS = 1_000L
+        private const val KEY_CONNECTED_ROBOT = "connected_robot_id"
 
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
@@ -206,7 +284,8 @@ class SupervisionViewModel(
                 SupervisionViewModel(
                     robot = app.container.robotRepository,
                     simulator = app.container.simulatorControls,
-                    audit = app.container.auditRepository
+                    audit = app.container.auditRepository,
+                    savedStateHandle = createSavedStateHandle()
                 )
             }
         }

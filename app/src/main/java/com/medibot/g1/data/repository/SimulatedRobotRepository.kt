@@ -77,6 +77,8 @@ class SimulatedRobotRepository(
     private var coolingTargetC = NOMINAL_CAPSULE_TEMP_C
     private var activeRun: MissionRun? = null
     private var resumeTarget: OperationalState? = null
+    private var returnDestination: HospitalNode? = null
+    private var stoppedFrom: OperationalState? = null
     private var obstaclePresent = false
     private var fastBatteryDrain = false
     private val activeConditions = mutableSetOf<AlertCondition>()
@@ -170,8 +172,8 @@ class SimulatedRobotRepository(
     private fun handleStart(mission: MissionConfig): Verdict {
         val payload = robot.servicePayload
         return when {
-            robot.operationalState != OperationalState.IDLE_AT_DOCK -> Verdict.Refused(
-                "Robot en estado incompatible (${robot.operationalState.displayName}). Solo se inicia desde reposo."
+            robot.operationalState !in CommandRules.RESTING_STATES -> Verdict.Refused(
+                "Robot en estado incompatible (${robot.operationalState.displayName}). Solo se inicia desde la base o un punto seguro."
             )
             robot.batteryPercentage < OperationalLimits.MIN_BATTERY_TO_START_PCT -> Verdict.Refused(
                 "Batería insuficiente (${robot.batteryPercentage}%). Se requiere mínimo ${OperationalLimits.MIN_BATTERY_TO_START_PCT}%."
@@ -215,8 +217,9 @@ class SimulatedRobotRepository(
             val target = resumeTarget ?: OperationalState.EXECUTING_MISSION
             resumeTarget = null
             if (target == OperationalState.RETURNING_TO_SAFE_POINT || activeRun == null) {
-                startReturnToSafePoint()
-                Verdict.Accepted("Retorno a punto seguro reanudado.")
+                val destination = returnDestination ?: nearestSafePoint(robot.currentNode)
+                startReturn(destination, "Reanudando regreso hacia ${destination.displayName}.")
+                Verdict.Accepted("Regreso hacia ${destination.displayName} reanudado.")
             } else {
                 setWalking("Reanudando trayectoria.")
                 launchRouteRunner()
@@ -253,22 +256,15 @@ class SimulatedRobotRepository(
             "La misión fue abortada por orden del operador en ${robot.currentNode.displayName}."
         )
         finishMission(MissionStatus.CANCELLED, "Cancelada por el operador en ${robot.currentNode.displayName}.")
-        // TODO(definir): el informe indica que tras cancelar el robot vuelve a la base.
-        robot = robot.copy(
-            operationalState = OperationalState.IDLE_AT_DOCK,
-            speedMps = 0f,
-            posture = RobotPosture.BIPED_STANDING,
-            hriLedColor = LED_AMBER,
-            hriVoiceStatus = "Misión cancelada. En espera de instrucciones."
-        )
-        return Verdict.Accepted("Misión cancelada. El robot queda detenido a la espera de instrucciones.")
+        startReturn(HospitalNode.DOCK_BASE, "Misión cancelada. Regreso a la base de carga.")
+        return Verdict.Accepted("Misión cancelada. El robot regresa a la base de carga.")
     }
 
     private fun handleReturnToSafePoint(): Verdict = when {
         robot.batteryPercentage < OperationalLimits.CRITICAL_BATTERY_CROUCH_PCT -> Verdict.Refused(
             "Batería crítica (${robot.batteryPercentage}%): no es seguro caminar. El robot debe agacharse en el lugar."
         )
-        robot.operationalState == OperationalState.IDLE_AT_DOCK ||
+        robot.operationalState in CommandRules.RESTING_STATES ||
             robot.operationalState == OperationalState.LOW_BATTERY_CROUCHED -> Verdict.Refused(
             "Orden no aplicable en estado ${robot.operationalState.displayName}."
         )
@@ -277,12 +273,19 @@ class SimulatedRobotRepository(
         )
         else -> {
             resumeTarget = null
-            startReturnToSafePoint()
-            Verdict.Accepted("Retorno a punto seguro confirmado.")
+            val destination = nearestSafePoint(robot.currentNode)
+            startReturn(destination, "Desviando hacia ${destination.displayName}.")
+            Verdict.Accepted("Regreso al punto seguro más cercano confirmado: ${destination.displayName}.")
         }
     }
 
     private fun handleOperationalStop(): Verdict {
+        if (robot.operationalState == OperationalState.LOW_BATTERY_CROUCHED) {
+            return Verdict.Accepted("El robot ya está inmóvil en postura agachada.")
+        }
+        if (robot.operationalState != OperationalState.EMERGENCY_STOPPED) {
+            stoppedFrom = robot.operationalState
+        }
         motionJob?.cancel()
         resumeTarget = null
         robot = robot.copy(
@@ -295,7 +298,7 @@ class SimulatedRobotRepository(
         raiseAlert(
             AlertSeverity.CRITICAL,
             "Detención operativa",
-            "Detención por software ejecutada. No sustituye la parada física de emergencia del robot."
+            "Detención por software ejecutada. No sustituye la parada física de emergencia. El rearme se hace en forma presencial."
         )
         return Verdict.Accepted("Detención operativa completada: velocidad 0.0 m/s.")
     }
@@ -407,10 +410,13 @@ class SimulatedRobotRepository(
             "Misión ${run.config.name} entregada en ${run.config.destination.displayName} con validación NFC."
         )
         finishMission(MissionStatus.COMPLETED, "Entrega validada por NFC en destino.")
-        // TODO(definir): "En Base" se usa como estado de reposo aunque el robot esté en otro nodo.
-        robot = robot.copy(operationalState = OperationalState.IDLE_AT_DOCK)
-        publish()
         scheduleRelock()
+        // Tras la entrega despeja el puesto de enfermería y espera en el punto seguro más cercano.
+        startReturn(
+            nearestSafePoint(robot.currentNode),
+            "Entrega completada. Despejo el puesto y espero en el punto seguro."
+        )
+        publish()
     }
 
     /** Tras retirar la carga, el compartimento se vuelve a sellar para el próximo despacho. */
@@ -428,37 +434,48 @@ class SimulatedRobotRepository(
         }
     }
 
-    private fun startReturnToSafePoint() {
+    /**
+     * Desplazamiento hacia un punto seguro (la base en PB o la bahía de espera en P2).
+     * Si había una misión activa, queda registrada como cancelada: la carga no se entregó.
+     */
+    private fun startReturn(destination: HospitalNode, voice: String) {
         motionJob?.cancel()
         // Regresar es la acción que resuelve la batería baja: se camina despacio y con consumo normal.
         fastBatteryDrain = false
+        returnDestination = destination
+        val sameFloor = robot.currentNode.floor == destination.floor
         robot = robot.copy(
             operationalState = OperationalState.RETURNING_TO_SAFE_POINT,
             speedMps = RETURN_SPEED,
             posture = RobotPosture.BIPED_WALKING,
             hriLedColor = LED_AMBER,
-            hriVoiceStatus = "Desviando hacia punto seguro de espera."
+            hriVoiceStatus = voice
         )
         motionJob = scope.launch {
-            delay(timing.returnMs)
+            delay(if (sameFloor) timing.returnMs else timing.returnMs * 2)
             if (activeRun != null) {
                 finishMission(
                     MissionStatus.CANCELLED,
-                    "Desviada a punto seguro por orden del operador; carga no entregada."
+                    "Desviada a ${destination.displayName} por orden del operador; carga no entregada."
                 )
             }
-            // TODO(definir): punto seguro según piso y estado final propio (hoy: P2 + "En Base").
+            returnDestination = null
+            val atBase = destination == HospitalNode.DOCK_BASE
             robot = robot.copy(
-                operationalState = OperationalState.IDLE_AT_DOCK,
-                currentNode = HospitalNode.SAFE_POINT_P2,
+                operationalState = if (atBase) OperationalState.IDLE_AT_DOCK else OperationalState.AT_SAFE_POINT,
+                currentNode = destination,
                 speedMps = 0f,
                 posture = RobotPosture.BIPED_STANDING,
                 hriLedColor = LED_CYAN,
-                hriVoiceStatus = "A salvo en punto seguro de espera (P2)."
+                hriVoiceStatus = if (atBase) "En base de carga." else "En punto seguro de espera, fuera del flujo de camillas."
             )
             publish()
         }
     }
+
+    /** Punto seguro más cercano: la base en Planta Baja; la bahía de espera desde el ascensor o el Piso 2. */
+    private fun nearestSafePoint(node: HospitalNode): HospitalNode =
+        if (node.floor == 0) HospitalNode.DOCK_BASE else HospitalNode.SAFE_POINT_P2
 
     private fun blockByObstacle(node: HospitalNode) {
         obstaclePresent = true
@@ -553,9 +570,15 @@ class SimulatedRobotRepository(
         val newTemp = round2(temp + (coolingTargetC - temp) * 0.3f + random.nextInt(-1, 2) * 0.05f)
         val newVib = if (robot.speedMps > 0.05f) round2(0.12f + random.nextInt(0, 6) * 0.01f) else 0.05f
 
+        // Dentro del ascensor (cabina metálica) el enlace Wi-Fi se degrada.
+        val inElevator = robot.currentNode == HospitalNode.ELEVATOR_BANK
+        val latencyRange = if (inElevator) 180..420 else 28..85
+        val signalRange = if (inElevator) -84..-74 else -75..-20
         robot = robot.copy(
-            latencyMs = (robot.latencyMs + random.nextInt(-3, 5)).coerceIn(28, 85),
-            signalDbm = (robot.signalDbm + random.nextInt(-2, 3)).coerceIn(-75, -20),
+            latencyMs = (robot.latencyMs + random.nextInt(-3, 5) * (if (inElevator) 15 else 1))
+                .coerceIn(latencyRange.first, latencyRange.last),
+            signalDbm = (robot.signalDbm + random.nextInt(-2, 3))
+                .coerceIn(signalRange.first, signalRange.last),
             batteryTempCelsius = round1(robot.batteryTempCelsius + random.nextInt(-1, 2) * 0.1f).coerceIn(26f, 42f),
             servicePayload = payload.copy(compartmentTempCelsius = newTemp, bioSampleStabilityIndexG = newVib)
         )
@@ -577,7 +600,7 @@ class SimulatedRobotRepository(
             )
         }
         if (battery < OperationalLimits.CRITICAL_BATTERY_CROUCH_PCT &&
-            robot.operationalState != OperationalState.IDLE_AT_DOCK &&
+            robot.operationalState !in CommandRules.RESTING_STATES &&
             robot.operationalState != OperationalState.LOW_BATTERY_CROUCHED
         ) {
             crouchForLowBattery()
@@ -650,7 +673,11 @@ class SimulatedRobotRepository(
     private fun publish() {
         if (_linkUp.value) {
             _telemetry.value = robot.copy(
-                connectionStatus = ConnectionStatus.ONLINE,
+                connectionStatus = if (robot.currentNode == HospitalNode.ELEVATOR_BANK) {
+                    ConnectionStatus.DEGRADED
+                } else {
+                    ConnectionStatus.ONLINE
+                },
                 lastUpdatedTimestamp = clock()
             )
         }
@@ -674,6 +701,73 @@ class SimulatedRobotRepository(
             while (queuedEvents.isNotEmpty()) _events.tryEmit(queuedEvents.removeFirst())
             publish()
         }
+    }
+
+    override fun physicalRearm() {
+        scope.launch {
+            if (robot.operationalState != OperationalState.EMERGENCY_STOPPED) return@launch
+            val previous = stoppedFrom
+            stoppedFrom = null
+            if (previous == OperationalState.INCIDENT_BLOCKED && obstaclePresent) {
+                robot = robot.copy(
+                    operationalState = OperationalState.INCIDENT_BLOCKED,
+                    hriLedColor = LED_RED,
+                    hriVoiceStatus = "Rearmado. El obstáculo sigue presente."
+                )
+            } else {
+                resumeTarget = when {
+                    previous == OperationalState.RETURNING_TO_SAFE_POINT -> OperationalState.RETURNING_TO_SAFE_POINT
+                    activeRun != null -> OperationalState.EXECUTING_MISSION
+                    else -> null
+                }
+                robot = robot.copy(
+                    operationalState = stateAfterPhysicalRecovery(),
+                    posture = RobotPosture.BIPED_STANDING,
+                    hriLedColor = LED_AMBER,
+                    hriVoiceStatus = "Rearme presencial realizado. En espera de instrucciones."
+                )
+            }
+            raiseAlert(
+                AlertSeverity.INFO,
+                "Rearme presencial",
+                "Un técnico rearmó el robot en el lugar. Desde la consola puede reanudar, cancelar o regresar a punto seguro."
+            )
+            publish()
+        }
+    }
+
+    override fun physicalBatterySwap() {
+        scope.launch {
+            if (robot.operationalState != OperationalState.LOW_BATTERY_CROUCHED) return@launch
+            batteryLevel = 100.0
+            fastBatteryDrain = false
+            syncBattery()
+            resumeTarget = null
+            robot = robot.copy(
+                operationalState = stateAfterPhysicalRecovery(),
+                posture = RobotPosture.BIPED_STANDING,
+                hriLedColor = LED_AMBER,
+                hriVoiceStatus = "Batería reemplazada. En espera de instrucciones."
+            )
+            raiseAlert(
+                AlertSeverity.INFO,
+                "Batería reemplazada",
+                "Recarga presencial (hot-swap) completada al 100%. Ordene regresar a punto seguro."
+            )
+            evaluateThresholds()
+            publish()
+        }
+    }
+
+    /**
+     * Tras una intervención presencial el robot queda en pausa a la espera de órdenes, salvo que
+     * no tenga misión y ya esté en la base o en un punto seguro: ahí queda directamente en reposo.
+     */
+    private fun stateAfterPhysicalRecovery(): OperationalState = when {
+        activeRun != null || resumeTarget != null -> OperationalState.PAUSED
+        robot.currentNode == HospitalNode.DOCK_BASE -> OperationalState.IDLE_AT_DOCK
+        robot.currentNode == HospitalNode.SAFE_POINT_P2 -> OperationalState.AT_SAFE_POINT
+        else -> OperationalState.PAUSED
     }
 
     override fun resetSimulation() {
@@ -743,6 +837,8 @@ class SimulatedRobotRepository(
         relockJob?.cancel()
         activeRun = null
         resumeTarget = null
+        returnDestination = null
+        stoppedFrom = null
         obstaclePresent = false
         fastBatteryDrain = false
         batteryLevel = INITIAL_BATTERY

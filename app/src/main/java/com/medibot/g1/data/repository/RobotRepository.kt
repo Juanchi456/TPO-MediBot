@@ -47,4 +47,10 @@ interface SimulatorControls {
     fun injectScenario(scenario: SimulationScenario)
     fun restoreConnection()
     fun resetSimulation()
+
+    /** Rearme presencial tras una detención operativa (la app no puede rearmar el robot). */
+    fun physicalRearm()
+
+    /** Recarga presencial (cambio de batería) cuando el robot quedó agachado por batería crítica. */
+    fun physicalBatterySwap()
 }
