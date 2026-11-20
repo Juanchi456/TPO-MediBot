@@ -17,3 +17,11 @@ captures/
 *.log
 Thumbs.db
 
+
+# Fuera del repositorio: solo se versionan el código fuente, README.md y DOCS_TECNICOS_TP.md
+Contexto_Claude_md/
+docs/
+ANALISIS_CUMPLIMIENTO_TP.md
+TP HMI_HRI*.md
+*.docx
+.kotlin/

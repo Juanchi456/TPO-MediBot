@@ -10,7 +10,7 @@ App Android nativa (**Kotlin + Jetpack Compose**) para **supervisar y comandar**
 > **UADE — Desarrollo de Aplicaciones I.** Trabajo práctico HMI/HRI para robots de servicio.
 > Funciona **sin robot, sin servidor y sin internet**: el robot se simula en el propio dispositivo.
 
-📄 **Informe técnico:** [`TP HMI_HRI - MediBot G1 (Unitree G1 EDU) - Informe Técnico Completo.md`](TP%20HMI_HRI%20-%20MediBot%20G1%20(Unitree%20G1%20EDU)%20-%20Informe%20T%C3%A9cnico%20Completo.md) · 🏛️ **Arquitectura y contrato JSON:** [`DOCS_TECNICOS_TP.md`](DOCS_TECNICOS_TP.md) · 📸 **Evidencias:** [`docs/evidencias/`](docs/evidencias/README.md) · ✅ **Estado del TP:** [`ANALISIS_CUMPLIMIENTO_TP.md`](ANALISIS_CUMPLIMIENTO_TP.md)
+🏛️ **Documentación técnica** (arquitectura, máquina de estados, comandos, contrato JSON, escenarios y riesgos): [`DOCS_TECNICOS_TP.md`](DOCS_TECNICOS_TP.md)
 
 ---
 
